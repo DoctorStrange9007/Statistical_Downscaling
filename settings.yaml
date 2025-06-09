@@ -1,0 +1,7 @@
+input_dir: 'input/data/' 
+input_dir_mappings: 'input/data/'
+output_dir: 'output'
+input_fn: 'Input_file.xlsx'
+models:
+  {LinearMPD: {"name": "VAR(p)", "p": 1}}
+
