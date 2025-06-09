@@ -7,6 +7,3 @@
 env/
 venv/
 ENV/
-
-# Git
-.git/
