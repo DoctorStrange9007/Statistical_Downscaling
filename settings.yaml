@@ -3,5 +3,5 @@ input_dir_mappings: 'input/data/'
 output_dir: 'output'
 input_fn: 'Input_file.xlsx'
 models:
-  {LinearMPD: {"name": "VAR(p)", "p": 1}}
+  {LinearMPD: {'phi_type': 'linear', 'beta': 2, 'm': 'normal'}}
 

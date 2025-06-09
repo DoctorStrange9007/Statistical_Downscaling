@@ -2,7 +2,7 @@
 
 Mac:
 ## Environment 
-* Create a virtual environment with python 3.9.6: python 3.9 -m venv env
+* Create a virtual environment with python 3.9.6: python 3 -m venv env
 * Activate the environment in the terminal: source env/bin/activate 
 * Install the requirements: pip3 install -r requirements.txt 
 
