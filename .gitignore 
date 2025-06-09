@@ -1,0 +1,12 @@
+# macOS system files
+.DS_Store
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Git
+.git/
