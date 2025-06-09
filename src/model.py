@@ -1,5 +1,5 @@
-import numpy as np
-import pandas as pd
+
+i
 
 
 class Model:
@@ -28,8 +28,9 @@ class Model:
         self._run_sett = run_sett
 
 
-class LinearMDP():
+class LinearMDP:
     """"""
 
     def __init__(self):
         self.theta = 5
+        self.kappa = 6
