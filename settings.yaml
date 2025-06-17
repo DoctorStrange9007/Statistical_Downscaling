@@ -2,6 +2,7 @@ input_dir: 'input/data/'
 input_dir_mappings: 'input/data/'
 output_dir: 'output'
 input_fn: 'Input_file.xlsx'
+N: 10
 models:
-  {LinearMPD: {'phi_type': 'linear', 'beta': 2, 'm': 'normal'}}
+  {LinearMPD: {'data': 'gaussian', 'beta': 2, 'm': 'normal', d: '20'}}
 
