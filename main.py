@@ -18,16 +18,15 @@ if __name__ == "__main__":
     if not os.path.exists(run_sett["output_dir"]):
         os.makedirs(run_sett["output_dir"])
 
-    param_model = GaussianModel()
-    trans_kernel = GaussianKernel()
+    theta_init = np.random.dirichlet(
+        np.ones(run_sett["models"]["LinearMDP"]["d"]),
+        size=run_sett["models"]["LinearMDP"]["N"],
+    )
 
-    # Dummy toy data: (y, y', x, x') tuples
-    trajectory = GaussianKernel().trajectory
+    param_model = GaussianModel(run_sett)
+    trans_kernel = GaussianKernel(run_sett)
 
     # Create LinearMDP
-    mdp = LinearMDP(param_models=param_model, trans_kernels=trans_kernel)
-    # One gradient step
-    mdp.sgd_step(trajectory, lr=0.01)
+    mdp = LinearMDP(run_sett, param_model=param_model, trans_kernel=trans_kernel)
 
-    # Print updated theta_0
-    print("Updated theta_0:", mdp.transitions[0].theta)
+    mdp.sgd(lr=0.01)

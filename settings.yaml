@@ -1,8 +1,21 @@
-input_dir: 'input/data/' 
+input_dir: 'input/data/'
 input_dir_mappings: 'input/data/'
 output_dir: 'output'
 input_fn: 'Input_file.xlsx'
-N: 10
 models:
-  {LinearMPD: {'data': 'gaussian', 'beta': 2, 'm': 'normal', d: '20'}}
+  LinearMDP:
+    n_sim: 100
+    bound: -2,2
+    beta: 2
+    d: 2
+    N: 2 #{0,1,...,N} as we have three rows of w, N is 2
+    true_w:
+      - [0, 0]
+      - [0, 0]
+      - [0, 0]
+    nr_sg_steps: 100
+    init_w:
+      - [0.5, 0.2]
+      - [0.5, 0.2]
+      - [0.5, 0.2]
 
