@@ -26,32 +26,6 @@ class LinearMDP:
         self.trans_kernel = trans_kernel
         self.beta = self.model_sett["beta"]
 
-    def monte_carlo_integral(self, func, bounds, n_samples=100):
-        """
-        Estimate a multidimensional integral using Monte Carlo sampling.
-
-        Parameters
-        ----------
-        func : callable
-            Function to integrate. Should accept a 1D numpy array.
-        bounds : list of tuple
-            List of (lower, upper) bounds for each dimension.
-        n_samples : int, optional
-            Number of Monte Carlo samples (default: 100).
-
-        Returns
-        -------
-        float
-            Estimated value of the integral.
-        """
-        d = len(bounds)
-        samples = np.random.uniform(
-            low=[b[0] for b in bounds], high=[b[1] for b in bounds], size=(n_samples, d)
-        )
-        vals = np.array([func(sample) for sample in samples])
-        volume = np.prod([b[1] - b[0] for b in bounds])
-        return np.mean(vals) * volume
-
     def sgd(self, lr):
         """
         Run gradient descent for all time steps in the MDP.
@@ -151,29 +125,35 @@ class LinearMDP:
         beta = self.model_sett["beta"]
 
         for b in range(B):
-            for i in range(n + 1):
-                if i == 0:
-                    y0, y0_prime = self.param_model.get_ypair(n=0)
-                    trajectory = [(y0, y0_prime)]
-                else:
-                    y_prev, y_prev_prime = trajectory[i - 1]
-                    y, y_prime = self.param_model.get_ypair(
-                        n=i, ynm1=y_prev, ynm1_prime=y_prev_prime
-                    )
-                    trajectory.append((y, y_prime))
-            grad_b = self.U_n(n, yn=y, yn_prime=y_prime) * (
-                self.param_model.phi_n(y, y_prime, y_prev, y_prev_prime)
-                / self.param_model.q_n(n, y, y_prime, y_prev, y_prev_prime)
+            trajectories = self.param_model.get_trajectories(n)
+            grad_b = self.U_n(
+                n, yn=trajectories[n, 0, :], yn_prime=trajectories[n, 1, :]
+            ) * (
+                self.param_model.phi_n(
+                    trajectories[n, 0, :],
+                    trajectories[n, 1, :],
+                    trajectories[n - 1, 0, :],
+                    trajectories[n - 1, 1, :],
+                )
+                / self.param_model.q_n(
+                    n,
+                    trajectories[n, 0, :],
+                    trajectories[n, 1, :],
+                    trajectories[n - 1, 0, :],
+                    trajectories[n - 1, 1, :],
+                )
             ) + beta * (
-                self.gradient_KL_n_prime(n, y, y_prime)
-                + self.gradient_KL_n(n, y, y_prime)
+                self.gradient_KL_n_prime(
+                    n, trajectories[n, 0, :], trajectories[n, 1, :]
+                )
+                + self.gradient_KL_n(n, trajectories[n, 0, :], trajectories[n, 1, :])
             )
 
             grads.append(grad_b)
 
         return self.jacobian_softmax_n(n) @ ((1 / B) * np.sum(grads, axis=0))
 
-    def gradient_KL_n_prime(self, n, ynm1, ynm1_prime):
+    def gradient_KL_n_prime(self, n, ynm1, ynm1_prime, n_samples=100):
         """
         Compute the gradient of the KL divergence with respect to the parameters for the marginal distribution of y'_n.
 
@@ -196,14 +176,21 @@ class LinearMDP:
             return np.log(
                 self.param_model.q_n_marg2(n, z, ynm1, ynm1_prime)
                 / self.trans_kernel.m_n_prime(n, z, ynm1_prime)
-            ) * self.param_model.phi_n_marg2(z, ynm1, ynm1_prime)
+            )
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
-        return result
+        d = self.model_sett["d"]
+        grads = np.zeros(d)
+        for i in range(d):
+            z_samples = np.zeros((n_samples, d))
+            for k in range(n_samples):
+                z_samples[k, :] = self.param_model.phi_n_objects(ynm1, ynm1_prime, i)[
+                    2
+                ].rvs()
+            grads[i] = np.mean([int_func(z) for z in z_samples])
 
-    def gradient_KL_n(self, n, ynm1, ynm1_prime):
+        return grads
+
+    def gradient_KL_n(self, n, ynm1, ynm1_prime, n_samples=100):
         """
         Compute the gradient of the KL divergence with respect to the parameters for the marginal distribution of y_n.
 
@@ -226,14 +213,19 @@ class LinearMDP:
             return np.log(
                 self.param_model.q_n_marg1(n, z, ynm1, ynm1_prime)
                 / self.trans_kernel.m_n(n, z, ynm1)
-            ) * self.param_model.phi_n_marg1(z, ynm1, ynm1_prime)
+            )
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
-        return result
+        d = self.model_sett["d"]
+        grads = np.zeros(d)
+        for i in range(d):
+            z_samples = np.zeros((n_samples, d))
+            for k in range(n_samples):
+                z_samples[k, :] = self.param_model.phi_0_objects(i)[1].rvs()
+            grads[i] = np.mean([int_func(z) for z in z_samples])
 
-    def gradient_KL_0_prime(self):
+        return grads
+
+    def gradient_KL_0_prime(self, n_samples=100):
         """
         Compute the gradient of the KL divergence for the initial marginal distribution of y'_0.
 
@@ -246,14 +238,19 @@ class LinearMDP:
         def int_func(z):
             return np.log(
                 self.param_model.q_0_marg2(z) / self.trans_kernel.m_0_prime(z)
-            ) * self.param_model.phi_0_marg2(z)
+            )
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
-        return result
+        d = self.model_sett["d"]
+        grads = np.zeros(d)
+        for i in range(d):
+            z_samples = np.zeros((n_samples, d))
+            for k in range(n_samples):
+                z_samples[k, :] = self.param_model.phi_0_objects(i)[2].rvs()
+            grads[i] = np.mean([int_func(z) for z in z_samples])
 
-    def gradient_KL_0(self):
+        return grads
+
+    def gradient_KL_0(self, n_samples=100):
         """
         Compute the gradient of the KL divergence for the initial marginal distribution of y_0.
 
@@ -264,14 +261,17 @@ class LinearMDP:
         """
 
         def int_func(z):
-            return np.log(
-                self.param_model.q_0_marg1(z) / self.trans_kernel.m_0(z)
-            ) * self.param_model.phi_0_marg1(z)
+            return np.log(self.param_model.q_0_marg1(z) / self.trans_kernel.m_0(z))
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
-        return result
+        d = self.model_sett["d"]
+        grads = np.zeros(d)
+        for i in range(d):
+            z_samples = np.zeros((n_samples, d))
+            for k in range(n_samples):
+                z_samples[k, :] = self.param_model.phi_0_objects(i)[1].rvs()
+            grads[i] = np.mean([int_func(z) for z in z_samples])
+
+        return grads
 
     def c_n(self, n, yn, yn_prime):
         """
@@ -291,9 +291,9 @@ class LinearMDP:
         float
             Squared Euclidean distance between yn and yn_prime.
         """
-        return np.sum((yn - yn_prime) ** 2)
+        return (1 / 2) * np.sum((yn - yn_prime) ** 2)
 
-    def KL_0(self):
+    def KL_0(self, n_samples=100):
         """
         Compute the KL divergence for the initial marginal distribution of y_0.
 
@@ -304,16 +304,19 @@ class LinearMDP:
         """
 
         def int_func(z):
-            return np.log(
-                self.param_model.q_0_marg1(z) / self.trans_kernel.m_0(z)
-            ) * self.param_model.q_0_marg1(z)
+            return np.log(self.param_model.q_0_marg1(z) / self.trans_kernel.m_0(z))
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
+        d = self.model_sett["d"]
+        z_samples = np.zeros((n_samples, d))
+        for k in range(n_samples):
+            i = np.random.choice(d, p=self.param_model.theta[0])
+            z_samples[k, :] = self.param_model.phi_0_objects(i)[1].rvs()
+
+        result = np.mean([int_func(z) for z in z_samples])
+
         return result
 
-    def KL_0_prime(self):
+    def KL_0_prime(self, n_samples=100):
         """
         Compute the KL divergence for the initial marginal distribution of y'_0.
 
@@ -326,14 +329,19 @@ class LinearMDP:
         def int_func(z):
             return np.log(
                 self.param_model.q_0_marg2(z) / self.trans_kernel.m_0_prime(z)
-            ) * self.param_model.q_0_marg2(z)
+            )
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
+        d = self.model_sett["d"]
+        z_samples = np.zeros((n_samples, d))
+        for k in range(n_samples):
+            i = np.random.choice(d, p=self.param_model.theta[0])
+            z_samples[k, :] = self.param_model.phi_0_objects(i)[2].rvs()
+
+        result = np.mean([int_func(z) for z in z_samples])
+
         return result
 
-    def KL_n(self, n, ynm1, ynm1_prime):
+    def KL_n(self, n, ynm1, ynm1_prime, n_samples=100):
         """
         Compute the KL divergence for the marginal distribution of y_n.
 
@@ -356,14 +364,21 @@ class LinearMDP:
             return np.log(
                 self.param_model.q_n_marg1(n, z, ynm1, ynm1_prime)
                 / self.trans_kernel.m_n(n, z, ynm1)
-            ) * self.param_model.q_n_marg1(n, z, ynm1, ynm1_prime)
+            )
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
+        d = self.model_sett["d"]
+        z_samples = np.zeros((n_samples, d))
+        for k in range(n_samples):
+            i = np.random.choice(d, p=self.param_model.theta[n])
+            z_samples[k, :] = self.param_model.phi_n_objects(ynm1, ynm1_prime, i)[
+                1
+            ].rvs()
+
+        result = np.mean([int_func(z) for z in z_samples])
+
         return result
 
-    def KL_n_prime(self, n, ynm1, ynm1_prime):
+    def KL_n_prime(self, n, ynm1, ynm1_prime, n_samples=100):
         """
         Compute the KL divergence for the marginal distribution of y'_n.
 
@@ -386,11 +401,18 @@ class LinearMDP:
             return np.log(
                 self.param_model.q_n_marg2(n, z, ynm1, ynm1_prime)
                 / self.trans_kernel.m_n_prime(n, z, ynm1_prime)
-            ) * self.param_model.q_n_marg2(n, z, ynm1, ynm1_prime)
+            )
 
-        bound = tuple(map(int, self.model_sett["bound"].split(",")))
-        bounds = [bound for _ in range(self.model_sett["d"])]
-        result = self.monte_carlo_integral(int_func, bounds)
+        d = self.model_sett["d"]
+        z_samples = np.zeros((n_samples, d))
+        for k in range(n_samples):
+            i = np.random.choice(d, p=self.param_model.theta[n])
+            z_samples[k, :] = self.param_model.phi_n_objects(ynm1, ynm1_prime, i)[
+                2
+            ].rvs()
+
+        result = np.mean([int_func(z) for z in z_samples])
+
         return result
 
     def U_N(self, N, yN, yN_prime):
@@ -440,30 +462,20 @@ class LinearMDP:
         exp_ls = []
         for b in range(B):
             exp_inst = 0
-            trajectory = np.zeros((N, 2, d))
-            for i in range(N):
-                if i == 0:
-                    y0, y0_prime = self.param_model.get_ypair(n=0)
-                    trajectory[i, 0, :] = y0
-                    trajectory[i, 1, :] = y0_prime
-                else:
-                    y_prev, y_prev_prime = trajectory[n - 1]
-                    y, y_prime = self.param_model.get_ypair(
-                        n=i, ynm1=y_prev, ynm1_prime=y_prev_prime
-                    )
-                    trajectory[i, 0, :] = y
-                    trajectory[i, 1, :] = y_prime
+            trajectories = self.param_model.get_trajectories(N)
 
             for k in range(n + 1, N - 1):
                 exp_inst += self.c_n(
-                    k, yn=trajectory[k, 0, :], yn_prime=trajectory[k, 1, :]
+                    k, yn=trajectories[k, 0, :], yn_prime=trajectories[k, 1, :]
                 ) + beta * (
                     self.KL_n(
-                        k + 1, ynm1=trajectory[k, 0, :], ynm1_prime=trajectory[k, 1, :]
+                        k + 1,
+                        ynm1=trajectories[k, 0, :],
+                        ynm1_prime=trajectories[k, 1, :],
                     )
                 )
             exp_inst += self.c_n(
-                N, yn=trajectory[N - 1, 0, :], yn_prime=trajectory[N - 1, 1, :]
+                N, yn=trajectories[N - 1, 0, :], yn_prime=trajectories[N - 1, 1, :]
             )
             exp_ls.append(exp_inst)
         exp = (1 / B) * sum(exp_ls)
@@ -558,6 +570,23 @@ class GaussianModel:
             yn = self.phi_n_objects(ynm1, ynm1_prime, i)[1].rvs()
             yn_prime = self.phi_n_objects(ynm1, ynm1_prime, i)[2].rvs()
             return yn, yn_prime
+
+    def get_trajectories(self, k):
+        d = self.model_sett["d"]
+        trajectory = np.zeros((k + 1, 2, d))
+        for i in range(k + 1):
+            if i == 0:
+                y0, y0_prime = self.get_ypair(n=0)
+                trajectory[i, 0, :] = y0
+                trajectory[i, 1, :] = y0_prime
+            else:
+                y_prev = trajectory[i - 1, 0, :]
+                y_prev_prime = trajectory[i - 1, 1, :]
+                y, y_prime = self.get_ypair(n=i, ynm1=y_prev, ynm1_prime=y_prev_prime)
+                trajectory[i, 0, :] = y
+                trajectory[i, 1, :] = y_prime
+
+        return trajectory
 
     def q_n_marg2(self, n, yn_prime, ynm1, ynm1_prime):
         """

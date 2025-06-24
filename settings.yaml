@@ -6,9 +6,9 @@ models:
   LinearMDP:
     n_sim: 100
     bound: -2,2
-    beta: 2
+    beta: 0.1
     d: 2
-    N: 2 #{0,1,...,N} as we have three rows of w, N is 2
+    N: 2 #{0,1,...,N} hence N+1 length markov chain. So, we have three rows of w. 
     true_w:
       - [0, 0]
       - [0, 0]
