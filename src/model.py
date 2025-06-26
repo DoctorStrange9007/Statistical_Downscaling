@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.stats import multivariate_normal
+import pandas as pd
+import os
 
 
 class LinearMDP:
@@ -10,8 +12,8 @@ class LinearMDP:
     to minimize the KL divergence between a parameterized model and a target transition kernel.
     The optimization includes both cost terms and KL divergence regularization.
 
-    The model operates on pairs of states (y_n, y'_n) and uses mixture of Gaussians
-    for both the parameterized model and target kernel.
+    The model operates on pairs of states (y, y') and can use different forms parameterized model and target kernel
+    (e.g. mixture of Gaussians).
     """
 
     def __init__(self, run_sett: dict, param_model, trans_kernel):
@@ -27,13 +29,15 @@ class LinearMDP:
         trans_kernel : object
             Transition kernel (e.g., GaussianKernel) for the MDP.
         """
+        self.run_sett = run_sett  # Store the full run_sett
         self.model_sett = run_sett["models"]["LinearMDP"]
         self.param_model = param_model
         self.trans_kernel = trans_kernel
         self.beta = self.model_sett["beta"]
         self.converged = [False] * (self.model_sett["N"] + 1)
+        self.theta_history = []
 
-    def gd(self, lr):
+    def gd(self, lr, save_results=False):
         """
         Run gradient descent optimization for all time steps in the MDP.
 
@@ -45,9 +49,21 @@ class LinearMDP:
         ----------
         lr : float
             Learning rate for gradient descent updates.
+        save_results : bool, optional
+            Whether to save results to Excel file (default: False).
         """
         N = self.model_sett["N"]
         nr_gd_steps = self.model_sett["nr_gd_steps"]
+
+        # Add initial theta values as first row
+        if save_results:
+            init_data = {"gd_step": -1}  # Use -1 to indicate initial values
+            for i, theta_row in enumerate(self.param_model.theta):
+                for j, theta_val in enumerate(theta_row):
+                    col_name = f"theta_{i}_{j}"
+                    init_data[col_name] = theta_val
+            self.theta_history.append(init_data)
+
         print(self.param_model.theta)
         for t in range(nr_gd_steps):
             for n in range(N + 1):
@@ -57,6 +73,15 @@ class LinearMDP:
                 else:
                     if not self.converged[n]:
                         self.gd_n(lr, n)
+            # Record theta values at this step
+            if save_results:
+                step_data = {"gd_step": t}
+                for i, theta_row in enumerate(self.param_model.theta):
+                    for j, theta_val in enumerate(theta_row):
+                        col_name = f"theta_{i}_{j}"
+                        step_data[col_name] = theta_val
+                self.theta_history.append(step_data)
+
             print(t)
             print("theta")
             print("--------------------------------")
@@ -64,7 +89,21 @@ class LinearMDP:
             print("--------------------------------")
             if np.all(self.converged):
                 print("Converged")
+                if save_results:
+                    self.save_results()
                 break
+        if save_results:
+            self.save_results()
+
+    def save_results(self):
+        """
+        Save the results of the gradient descent optimization.
+        """
+        output_dir = self.run_sett["output_dir"]
+        df = pd.DataFrame(self.theta_history)
+        excel_path = os.path.join(output_dir, "theta_gradient_descent_history.xlsx")
+        df.to_excel(excel_path, index=False)
+        print(f"Gradient descent history saved to: {excel_path}")
 
     def gd_0(self, lr):
         """
@@ -75,8 +114,6 @@ class LinearMDP:
         lr : float
             Learning rate for GD update.
         """
-        # input trajectory for current theta value, and input that to compute_gradient_0 function
-        # trajectories = self.param_model.get_trajectories(0)
         grad = self.compute_gradient_0()
         self.param_model.w[0] -= lr * grad
         new_theta = self.param_model.batched_softmax(self.param_model.w[0])
@@ -95,7 +132,6 @@ class LinearMDP:
         n : int
             Time step index.
         """
-        # input trajectory for current theta value, and input that to compute_gradient_0 function
         grad = self.compute_gradient_n(n)
         self.param_model.w[n] -= lr * grad
         new_theta = self.param_model.batched_softmax(self.param_model.w[n])
@@ -114,7 +150,7 @@ class LinearMDP:
         Returns
         -------
         np.ndarray
-            Gradient vector for the initial time step parameters.
+            Gradient vector for the initial 0 time step parameters (theta_0).
         """
         grads = []
         beta = self.model_sett["beta"]
@@ -135,7 +171,7 @@ class LinearMDP:
 
     def compute_gradient_n(self, n):
         """
-        Compute the gradient of the loss with respect to the parameters at time step n > 0.
+        Compute the gradient of the loss with respect to the parameters at time step n > 0, for n = 1, ..., N.
 
         Parameters
         ----------
@@ -145,7 +181,7 @@ class LinearMDP:
         Returns
         -------
         np.ndarray
-            Gradient vector for time step n.
+            Gradient vector for time step n (theta_n).
         """
         grads = []
         n_sim = self.model_sett["n_sim"]
@@ -479,7 +515,7 @@ class LinearMDP:
 
     def U_n(self, n, yn, yn_prime):
         """
-        Compute the cost-to-go at time step n, including KL terms and expected future costs.
+        Compute the cost at time step n, including KL terms and expected future costs.
 
         Parameters
         ----------
@@ -493,7 +529,7 @@ class LinearMDP:
         Returns
         -------
         float
-            Cost-to-go at time step n.
+            Cost at time step n.
         """
         if n == self.model_sett["N"]:
             return self.U_N(n, yn, yn_prime)
@@ -970,7 +1006,7 @@ class GaussianModel:
         Returns
         -------
         tuple
-            Tuple of (joint, marginal y_n, marginal y'_n) multivariate normal distributions.
+            Tuple of (marginal y_n, marginal y'_n, joint y_n, y'_n) multivariate normal distributions.
         """
         d = self.model_sett["d"]
         A = [0.1 ** (i + 1) * np.eye(d) for i in range(d)]
@@ -1000,7 +1036,7 @@ class GaussianModel:
         Returns
         -------
         tuple
-            Tuple of (joint, marginal y_0, marginal y'_0) multivariate normal distributions.
+            Tuple of (marginal y_0, marginal y'_0, joint y_0, y'_0) multivariate normal distributions.
         """
         d = self.model_sett["d"]
         A = [0.1 ** (i + 1) * np.ones(d) for i in range(d)]
@@ -1093,7 +1129,7 @@ class GaussianKernel:
 
     def m_0_objects(self):
         """
-        Return the mixture components for y_0 and y'_0.
+        Return the multivariate normal components for y_0 and y'_0.
 
         Returns
         -------
@@ -1113,7 +1149,7 @@ class GaussianKernel:
 
     def m_0(self, y0):
         """
-        Compute the mixture PDF for y_0.
+        Compute the pdf of a mixture of multivariate normal distributions for y_0.
 
         Parameters
         ----------
@@ -1129,7 +1165,7 @@ class GaussianKernel:
 
     def m_0_prime(self, y0_prime):
         """
-        Compute the mixture PDF for y'_0.
+        Compute the pdf of a mixture of multivariate normal distributions for y'_0.
 
         Parameters
         ----------
@@ -1145,7 +1181,7 @@ class GaussianKernel:
 
     def m_n_objects(self, n, ynm1=None, ynm1_prime=None):
         """
-        Return the mixture components for y_n and/or y'_n at time n.
+        Return the multivariate normal components for y_n and/or y'_n at time n.
 
         Parameters
         ----------
@@ -1179,7 +1215,7 @@ class GaussianKernel:
 
     def m_n(self, n, yn, ynm1):
         """
-        Compute the mixture PDF for y_n at time n.
+        Compute the pdf of a mixture of multivariate normal distributions for y_n at time n.
 
         Parameters
         ----------
@@ -1199,7 +1235,7 @@ class GaussianKernel:
 
     def m_n_prime(self, n, yn_prime, ynm1_prime):
         """
-        Compute the mixture PDF for y'_n at time n.
+        Compute the pdf of a mixture of multivariate normal distributions for y'_n at time n.
 
         Parameters
         ----------

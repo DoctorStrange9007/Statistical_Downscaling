@@ -8,3 +8,5 @@ env/
 venv/
 ENV/
 __pycache__/
+# Output files
+output/

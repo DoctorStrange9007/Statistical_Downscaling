@@ -1,6 +1,6 @@
 input_dir: 'input/data/'
 input_dir_mappings: 'input/data/'
-output_dir: 'output'
+output_dir: 'output/'
 input_fn: 'Input_file.xlsx'
 lr_rate: 0.05
 models:
@@ -9,15 +9,15 @@ models:
     beta: 10
     d: 2
     N: 2 #{0,1,...,N} hence N+1 length markov chain. So, we have three rows of w. 
-    #true_theta:
-    #  - [1-1e-10, 1e-10]  
-    #  - [1-1e-10, 1e-10]
-    #  - [1-1e-10, 1e-10]
+    true_theta:
+      #- [1-1e-10, 1e-10]  
+      #- [1-1e-10, 1e-10]
+      #- [1-1e-10, 1e-10]
     true_theta:
       - [0.7, 0.3]  
       - [0.7, 0.3]
       - [0.7, 0.3]
-    nr_gd_steps: 100
+    nr_gd_steps: 10
     init_theta:
       - [0.5, 0.5]  
       - [0.5, 0.5]
