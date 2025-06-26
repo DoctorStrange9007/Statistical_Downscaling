@@ -24,4 +24,5 @@ if __name__ == "__main__":
     # Create LinearMDP
     mdp = LinearMDP(run_sett, param_model=param_model, trans_kernel=trans_kernel)
 
-    mdp.sgd(lr=0.01)
+    lr_rate = run_sett["lr_rate"]
+    mdp.gd(lr=lr_rate)

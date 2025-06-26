@@ -2,20 +2,24 @@ input_dir: 'input/data/'
 input_dir_mappings: 'input/data/'
 output_dir: 'output'
 input_fn: 'Input_file.xlsx'
+lr_rate: 0.05
 models:
   LinearMDP:
-    n_sim: 100
-    bound: -2,2
-    beta: 0.1
+    n_sim: 20
+    beta: 10
     d: 2
     N: 2 #{0,1,...,N} hence N+1 length markov chain. So, we have three rows of w. 
-    true_w:
-      - [0, 0]
-      - [0, 0]
-      - [0, 0]
-    nr_sg_steps: 100
-    init_w:
-      - [0.5, 0.2]
-      - [0.5, 0.2]
-      - [0.5, 0.2]
+    #true_theta:
+    #  - [1-1e-10, 1e-10]  
+    #  - [1-1e-10, 1e-10]
+    #  - [1-1e-10, 1e-10]
+    true_theta:
+      - [0.7, 0.3]  
+      - [0.7, 0.3]
+      - [0.7, 0.3]
+    nr_gd_steps: 100
+    init_theta:
+      - [0.5, 0.5]  
+      - [0.5, 0.5]
+      - [0.5, 0.5]
 
