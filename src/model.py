@@ -31,10 +31,14 @@ class LinearMDP:
         """
         self.run_sett = run_sett  # Store the full run_sett
         self.model_sett = run_sett["models"]["LinearMDP"]
+        self.beta = self.model_sett["beta"]
+        self.n_sim = self.model_sett["n_sim"]
+        self.nr_gd_steps = self.model_sett["nr_gd_steps"]
+        self.d = self.model_sett["d"]
         self.param_model = param_model
         self.trans_kernel = trans_kernel
-        self.beta = self.model_sett["beta"]
-        self.converged = [False] * (self.model_sett["N"] + 1)
+        self.N = self.model_sett["N"]
+        self.converged = [False] * (self.N + 1)
         self.theta_history = []
 
     def gd(self, lr, save_results=False):
@@ -52,8 +56,8 @@ class LinearMDP:
         save_results : bool, optional
             Whether to save results to Excel file (default: False).
         """
-        N = self.model_sett["N"]
-        nr_gd_steps = self.model_sett["nr_gd_steps"]
+        N = self.N
+        nr_gd_steps = self.nr_gd_steps
 
         # Add initial theta values as first row
         if save_results:
@@ -153,8 +157,8 @@ class LinearMDP:
             Gradient vector for the initial 0 time step parameters (theta_0).
         """
         grads = []
-        beta = self.model_sett["beta"]
-        n_sim = self.model_sett["n_sim"]
+        beta = self.beta
+        n_sim = self.n_sim
         for b in range(n_sim):
             y0, y0_prime = self.param_model.get_ypair(n=0)
             grad_b = self.U_n(0, yn=y0, yn_prime=y0_prime) * (
@@ -184,37 +188,43 @@ class LinearMDP:
             Gradient vector for time step n (theta_n).
         """
         grads = []
-        n_sim = self.model_sett["n_sim"]
-        beta = self.model_sett["beta"]
+        n_sim = self.n_sim
+        beta = self.beta
 
         for b in range(n_sim):
-            trajectories = self.param_model.get_trajectories(n)
+            trajectories = self.param_model.get_trajectories(k=n)
             grad_b = self.U_n(
-                n, yn=trajectories[n, 0, :], yn_prime=trajectories[n, 1, :]
+                n=n, yn=trajectories[n, 0, :], yn_prime=trajectories[n, 1, :]
             ) * (
                 self.param_model.phi_n(
-                    trajectories[n, 0, :],
-                    trajectories[n, 1, :],
-                    trajectories[n - 1, 0, :],
-                    trajectories[n - 1, 1, :],
+                    yn=trajectories[n, 0, :],
+                    yn_prime=trajectories[n, 1, :],
+                    ynm1=trajectories[n - 1, 0, :],
+                    ynm1_prime=trajectories[n - 1, 1, :],
                 )
                 / self.param_model.q_n(
-                    n,
-                    trajectories[n, 0, :],
-                    trajectories[n, 1, :],
-                    trajectories[n - 1, 0, :],
-                    trajectories[n - 1, 1, :],
+                    n=n,
+                    yn=trajectories[n, 0, :],
+                    yn_prime=trajectories[n, 1, :],
+                    ynm1=trajectories[n - 1, 0, :],
+                    ynm1_prime=trajectories[n - 1, 1, :],
                 )
             ) + beta * (
                 self.gradient_KL_n_prime(
-                    n, trajectories[n, 0, :], trajectories[n, 1, :]
+                    n=n,
+                    ynm1=trajectories[n - 1, 0, :],
+                    ynm1_prime=trajectories[n - 1, 1, :],
                 )
-                + self.gradient_KL_n(n, trajectories[n, 0, :], trajectories[n, 1, :])
+                + self.gradient_KL_n(
+                    n=n,
+                    ynm1=trajectories[n - 1, 0, :],
+                    ynm1_prime=trajectories[n - 1, 1, :],
+                )
             )
 
             grads.append(grad_b)
 
-        return self.jacobian_softmax_n(n) @ np.mean(grads, axis=0)
+        return self.jacobian_softmax_n(n=n) @ np.mean(grads, axis=0)
 
     def gradient_KL_n_prime(self, n, ynm1, ynm1_prime):
         """
@@ -234,7 +244,7 @@ class LinearMDP:
         float
             Estimated gradient of the KL divergence for y'_n.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
 
         def int_func(z):
             return np.log(
@@ -272,7 +282,7 @@ class LinearMDP:
         float
             Estimated gradient of the KL divergence for y_n.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
 
         def int_func(z):
             return np.log(
@@ -280,7 +290,7 @@ class LinearMDP:
                 / self.trans_kernel.m_n(n, z, ynm1)
             )
 
-        d = self.model_sett["d"]
+        d = self.d
         grads = np.zeros(d)
         for i in range(d):
             z_samples = np.zeros((n_sim, d))
@@ -301,19 +311,20 @@ class LinearMDP:
         float
             Estimated gradient of the KL divergence for y'_0.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
+        d = self.d
 
         def int_func(z):
             return np.log(
                 self.param_model.q_0_marg2(z) / self.trans_kernel.m_0_prime(z)
             )
 
-        d = self.model_sett["d"]
         grads = np.zeros(d)
+        _, phi_0_objects_y0_prime_temp, _ = self.param_model.phi_0_objects()
         for i in range(d):
             z_samples = np.zeros((n_sim, d))
             for k in range(n_sim):
-                z_samples[k, :] = self.param_model.phi_0_objects()[1][i].rvs()
+                z_samples[k, :] = phi_0_objects_y0_prime_temp[i].rvs()
             grads[i] = np.mean([int_func(z) for z in z_samples])
 
         return grads
@@ -327,17 +338,18 @@ class LinearMDP:
         float
             Estimated gradient of the KL divergence for y_0.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
+        d = self.model_sett["d"]
 
         def int_func(z):
             return np.log(self.param_model.q_0_marg1(z) / self.trans_kernel.m_0(z))
 
-        d = self.model_sett["d"]
         grads = np.zeros(d)
+        phi_0_objects_y0_temp, _, _ = self.param_model.phi_0_objects()
         for i in range(d):
             z_samples = np.zeros((n_sim, d))
             for k in range(n_sim):
-                z_samples[k, :] = self.param_model.phi_0_objects()[0][i].rvs()
+                z_samples[k, :] = phi_0_objects_y0_temp[i].rvs()
             grads[i] = np.mean([int_func(z) for z in z_samples])
 
         return grads
@@ -376,12 +388,12 @@ class LinearMDP:
         float
             Estimated KL divergence for y_0.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
+        d = self.model_sett["d"]
 
         def int_func(z):
             return np.log(self.param_model.q_0_marg1(z) / self.trans_kernel.m_0(z))
 
-        d = self.model_sett["d"]
         z_samples = np.zeros((n_sim, d))
         for k in range(n_sim):
             i = np.random.choice(d, p=self.param_model.theta[0])
@@ -400,14 +412,14 @@ class LinearMDP:
         float
             Estimated KL divergence for y'_0.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
+        d = self.d
 
         def int_func(z):
             return np.log(
                 self.param_model.q_0_marg2(z) / self.trans_kernel.m_0_prime(z)
             )
 
-        d = self.model_sett["d"]
         z_samples = np.zeros((n_sim, d))
         for k in range(n_sim):
             i = np.random.choice(d, p=self.param_model.theta[0])
@@ -435,7 +447,8 @@ class LinearMDP:
         float
             Estimated KL divergence for y_n.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
+        d = self.d
 
         def int_func(z):
             return np.log(
@@ -443,13 +456,11 @@ class LinearMDP:
                 / self.trans_kernel.m_n(n, z, ynm1)
             )
 
-        d = self.model_sett["d"]
         z_samples = np.zeros((n_sim, d))
+        phi_n_objects_yn_temp, _, _ = self.param_model.phi_n_objects(ynm1, ynm1_prime)
         for k in range(n_sim):
             i = np.random.choice(d, p=self.param_model.theta[n])
-            z_samples[k, :] = self.param_model.phi_n_objects(ynm1, ynm1_prime)[0][
-                i
-            ].rvs()
+            z_samples[k, :] = phi_n_objects_yn_temp[i].rvs()
 
         result = np.mean([int_func(z) for z in z_samples])
 
@@ -473,7 +484,8 @@ class LinearMDP:
         float
             Estimated KL divergence for y'_n.
         """
-        n_sim = self.model_sett["n_sim"]
+        n_sim = self.n_sim
+        d = self.d
 
         def int_func(z):
             return np.log(
@@ -481,13 +493,13 @@ class LinearMDP:
                 / self.trans_kernel.m_n_prime(n, z, ynm1_prime)
             )
 
-        d = self.model_sett["d"]
         z_samples = np.zeros((n_sim, d))
+        _, phi_n_objects_yn_prime_temp, _ = self.param_model.phi_n_objects(
+            ynm1, ynm1_prime
+        )
         for k in range(n_sim):
             i = np.random.choice(d, p=self.param_model.theta[n])
-            z_samples[k, :] = self.param_model.phi_n_objects(ynm1, ynm1_prime)[1][
-                i
-            ].rvs()
+            z_samples[k, :] = phi_n_objects_yn_prime_temp[i].rvs()
 
         result = np.mean([int_func(z) for z in z_samples])
 
@@ -531,12 +543,13 @@ class LinearMDP:
         float
             Cost at time step n.
         """
-        if n == self.model_sett["N"]:
+        beta = self.beta
+        n_sim = self.n_sim
+        N = self.N
+
+        if n == N:
             return self.U_N(n, yn, yn_prime)
-        beta = self.model_sett["beta"]
-        n_sim = self.model_sett["n_sim"]
-        N = self.model_sett["N"]
-        d = self.model_sett["d"]
+
         exp_ls = []
         for b in range(n_sim):
             exp_inst = 0
@@ -551,9 +564,14 @@ class LinearMDP:
                         ynm1=trajectories[k, 0, :],
                         ynm1_prime=trajectories[k, 1, :],
                     )
+                    + self.KL_n_prime(
+                        k + 1,
+                        ynm1=trajectories[k, 0, :],
+                        ynm1_prime=trajectories[k, 1, :],
+                    )
                 )
             exp_inst += self.c_n(
-                N, yn=trajectories[N - 1, 0, :], yn_prime=trajectories[N - 1, 1, :]
+                N, yn=trajectories[N, 0, :], yn_prime=trajectories[N, 1, :]
             )
             exp_ls.append(exp_inst)
         exp = np.mean(exp_ls)
@@ -610,6 +628,7 @@ class GaussianModel:
             Dictionary containing model and run settings.
         """
         self.model_sett = run_sett["models"]["LinearMDP"]
+        self.d = self.model_sett["d"]
         if isinstance(self.model_sett["init_theta"][0][0], str):
             self.theta = np.array(
                 [
@@ -685,17 +704,21 @@ class GaussianModel:
         tuple of np.ndarray
             Sampled states (y, y').
         """
-        k = self.theta.shape[1]
-        d = self.model_sett["d"]
+        d = self.d
+
         if ynm1 is None and ynm1_prime is None:
-            i = np.random.choice(k, p=self.theta[0])
-            y0 = self.phi_0_objects()[0][i].rvs()
-            y0_prime = self.phi_0_objects()[1][i].rvs()
+            i = np.random.choice(d, p=self.theta[0])
+            phi_0_objects_y0_temp, phi_0_objects_y0_prime_temp, _ = self.phi_0_objects()
+            y0 = phi_0_objects_y0_temp[i].rvs()
+            y0_prime = phi_0_objects_y0_prime_temp[i].rvs()
             return y0, y0_prime
         else:
-            i = np.random.choice(k, p=self.theta[n])
-            yn = self.phi_n_objects(ynm1, ynm1_prime)[0][i].rvs()
-            yn_prime = self.phi_n_objects(ynm1, ynm1_prime)[1][i].rvs()
+            i = np.random.choice(d, p=self.theta[n])
+            phi_n_objects_yn_temp, phi_n_objects_yn_prime_temp, _ = self.phi_n_objects(
+                ynm1, ynm1_prime
+            )
+            yn = phi_n_objects_yn_temp[i].rvs()
+            yn_prime = phi_n_objects_yn_prime_temp[i].rvs()
             return yn, yn_prime
 
     def get_trajectories(self, k):
@@ -719,19 +742,20 @@ class GaussianModel:
             - Second dimension: [y, y'] states
             - Third dimension: d-dimensional state space
         """
-        d = self.model_sett["d"]
+        d = self.d
+
         trajectories = np.zeros((k + 1, 2, d))
-        for i in range(k + 1):
-            if i == 0:
+        for n in range(k + 1):
+            if n == 0:
                 y0, y0_prime = self.get_ypair(n=0)
-                trajectories[i, 0, :] = y0
-                trajectories[i, 1, :] = y0_prime
+                trajectories[n, 0, :] = y0
+                trajectories[n, 1, :] = y0_prime
             else:
-                y_prev = trajectories[i - 1, 0, :]
-                y_prev_prime = trajectories[i - 1, 1, :]
-                y, y_prime = self.get_ypair(n=i, ynm1=y_prev, ynm1_prime=y_prev_prime)
-                trajectories[i, 0, :] = y
-                trajectories[i, 1, :] = y_prime
+                y_prev = trajectories[n - 1, 0, :]
+                y_prev_prime = trajectories[n - 1, 1, :]
+                y, y_prime = self.get_ypair(n=n, ynm1=y_prev, ynm1_prime=y_prev_prime)
+                trajectories[n, 0, :] = y
+                trajectories[n, 1, :] = y_prime
 
         return trajectories
 
@@ -877,7 +901,7 @@ class GaussianModel:
         return np.array(
             [
                 self.phi_n_objects(ynm1, ynm1_prime)[2][i].pdf(yyprime)
-                for i in range(self.model_sett["d"])
+                for i in range(self.d)
             ]
         )
 
@@ -900,10 +924,7 @@ class GaussianModel:
             Vector of marginal densities for each component.
         """
         return np.array(
-            [
-                self.phi_n_objects(ynm1, ynm1_prime)[0][i].pdf(yn)
-                for i in range(self.model_sett["d"])
-            ]
+            [self.phi_n_objects(ynm1, ynm1_prime)[0][i].pdf(yn) for i in range(self.d)]
         )
 
     def phi_n_marg2(self, yn_prime, ynm1, ynm1_prime):
@@ -927,7 +948,7 @@ class GaussianModel:
         return np.array(
             [
                 self.phi_n_objects(ynm1, ynm1_prime)[1][i].pdf(yn_prime)
-                for i in range(self.model_sett["d"])
+                for i in range(self.d)
             ]
         )
 
@@ -950,7 +971,7 @@ class GaussianModel:
         return np.array(
             [
                 self.phi_0_objects()[2][i].pdf(np.concatenate([y0, y0_prime]))
-                for i in range(self.model_sett["d"])
+                for i in range(self.d)
             ]
         )
 
@@ -968,9 +989,7 @@ class GaussianModel:
         np.ndarray
             Vector of marginal densities for each component.
         """
-        return np.array(
-            [self.phi_0_objects()[0][i].pdf(y0) for i in range(self.model_sett["d"])]
-        )
+        return np.array([self.phi_0_objects()[0][i].pdf(y0) for i in range(self.d)])
 
     def phi_0_marg2(self, y0_prime):
         """
@@ -986,9 +1005,9 @@ class GaussianModel:
         np.ndarray
             Vector of marginal densities for each component.
         """
-        d = self.model_sett["d"]
-
-        return np.array([self.phi_0_objects()[1][i].pdf(y0_prime) for i in range(d)])
+        return np.array(
+            [self.phi_0_objects()[1][i].pdf(y0_prime) for i in range(self.d)]
+        )
 
     def phi_n_objects(self, ynm1, ynm1_prime):
         """
@@ -1008,7 +1027,8 @@ class GaussianModel:
         tuple
             Tuple of (marginal y_n, marginal y'_n, joint y_n, y'_n) multivariate normal distributions.
         """
-        d = self.model_sett["d"]
+        d = self.d
+
         A = [0.1 ** (i + 1) * np.eye(d) for i in range(d)]
         # B = 0.1*(i+1) * np.eye(d)
         B = [np.zeros((d, d)) for i in range(d)]
@@ -1038,7 +1058,8 @@ class GaussianModel:
         tuple
             Tuple of (marginal y_0, marginal y'_0, joint y_0, y'_0) multivariate normal distributions.
         """
-        d = self.model_sett["d"]
+        d = self.d
+
         A = [0.1 ** (i + 1) * np.ones(d) for i in range(d)]
         B = [0.1 ** (i + 1) * np.ones(d) for i in range(d)]
 
@@ -1073,6 +1094,7 @@ class GaussianKernel:
             Dictionary containing model and run settings.
         """
         self.model_sett = run_sett["models"]["LinearMDP"]
+        self.d = self.model_sett["d"]
         if isinstance(self.model_sett["true_theta"][0][0], str):
             self.true_theta = np.array(
                 [
@@ -1083,7 +1105,6 @@ class GaussianKernel:
             )
         else:
             self.true_theta = np.array(self.model_sett["true_theta"])
-        self.trajectory = self.get_trajectory()
 
     def MVNMixture_rvs(self, components, n):
         """
@@ -1101,7 +1122,7 @@ class GaussianKernel:
         np.ndarray
             Sampled value from the mixture.
         """
-        d = self.model_sett["d"]
+        d = self.d
         i = np.random.choice(d, p=self.true_theta[n])
         sample = components[i].rvs()
         return sample
@@ -1124,8 +1145,11 @@ class GaussianKernel:
         float
             Mixture PDF value at the given value.
         """
-        d = self.model_sett["d"]
-        return sum(self.true_theta[n][k] * components[k].pdf(value) for k in range(d))
+        d = self.d
+
+        return np.dot(
+            self.true_theta[n], np.array([components[i].pdf(value) for i in range(d)])
+        )
 
     def m_0_objects(self):
         """
@@ -1136,7 +1160,8 @@ class GaussianKernel:
         tuple
             Tuple of lists of multivariate normal components for y_0 and y'_0.
         """
-        d = self.model_sett["d"]
+        d = self.d
+
         As = [0.1 ** (i + 1) * np.ones(d) for i in range(d)]
         Bs = [0.1 ** (i + 1) * np.ones(d) for i in range(d)]
 
@@ -1197,7 +1222,8 @@ class GaussianKernel:
         list or tuple
             List(s) of multivariate normal components for y_n and/or y'_n.
         """
-        d = self.model_sett["d"]
+        d = self.d
+
         As = [0.1 ** (i + 1) * np.eye(d) for i in range(d)]
         Ds = [0.1 ** (i + 1) * np.eye(d) for i in range(d)]
         Sigma = 0.1 * np.eye(2 * d)
@@ -1254,36 +1280,3 @@ class GaussianKernel:
         return self.MVNMixture_pdf(
             self.m_n_objects(n, ynm1_prime=ynm1_prime), yn_prime, n=n
         )
-
-    def get_trajectory(self):
-        """
-        Create the y and y' sequences according to the assumed Markovian transition kernels, assuming Gaussianity.
-
-        Returns
-        -------
-        np.ndarray
-            Trajectory array of shape (N, 2, d) containing y and y' for all time steps.
-        """
-        N = self.model_sett["N"]
-        d = self.model_sett["d"]
-        trajectory = np.zeros((N, 2, d))
-
-        # Initial values y_0 and y_0' ~ N(0, I_d)
-        y0 = self.MVNMixture_rvs(self.m_0_objects()[0], n=0)
-        y0_prime = self.MVNMixture_rvs(self.m_0_objects()[1], n=0)
-
-        trajectory[0, 0, :] = y0
-        trajectory[0, 1, :] = y0_prime
-
-        # Transition: y_n ~ N(y_{n-1}, I_d), and similarly for y'
-        for n in range(1, N):
-            yn = self.MVNMixture_rvs(
-                self.m_n_objects(n, ynm1=trajectory[n - 1, 0, :]), n=n
-            )
-            yn_prime = self.MVNMixture_rvs(
-                self.m_n_objects(n, ynm1_prime=trajectory[n - 1, 1, :]), n=n
-            )
-            trajectory[n, 0, :] = yn
-            trajectory[n, 1, :] = yn_prime
-
-        return trajectory

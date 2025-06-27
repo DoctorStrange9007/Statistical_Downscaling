@@ -9,10 +9,7 @@ def plot_theta_pairs(output_dir: str, true_theta: list, save_plot: bool = True):
     """
     Plot theta parameters in pairs over gradient descent steps.
 
-    Creates plots where each plot shows two theta parameters together:
-    - theta_0_0 and theta_0_1 in one plot
-    - theta_1_0 and theta_1_1 in another plot
-    - etc.
+    Creates plots where each plot shows theta_0, theta_1, ..., theta_N.
 
     Parameters
     ----------
