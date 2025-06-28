@@ -72,11 +72,13 @@ class LinearMDP:
         for t in range(nr_gd_steps):
             for n in range(N + 1):
                 if n == 0:
-                    if not self.converged[0]:
+                    if not self.converged[0] and not self.param_model.overflow:
                         self.gd_0(lr)
                 else:
-                    if not self.converged[n]:
+                    if not self.converged[n] and not self.param_model.overflow:
                         self.gd_n(lr, n)
+            if self.param_model.overflow or np.all(self.converged):
+                break
             # Record theta values at this step
             if save_results:
                 step_data = {"gd_step": t}
@@ -121,6 +123,9 @@ class LinearMDP:
         grad = self.compute_gradient_0()
         self.param_model.w[0] -= lr * grad
         new_theta = self.param_model.batched_softmax(self.param_model.w[0])
+        if self.param_model.overflow:
+            print(f"Overflow detected in gd_0, skipping this update")
+            return
         if np.allclose(new_theta, self.param_model.theta[0], rtol=0, atol=1e-5):
             self.converged[0] = True
         self.param_model.theta[0] = new_theta
@@ -139,6 +144,9 @@ class LinearMDP:
         grad = self.compute_gradient_n(n)
         self.param_model.w[n] -= lr * grad
         new_theta = self.param_model.batched_softmax(self.param_model.w[n])
+        if self.param_model.overflow:
+            print(f"Overflow detected in gd_n for n={n}, skipping this update")
+            return
         if np.allclose(new_theta, self.param_model.theta[n], rtol=0, atol=1e-5):
             self.converged[n] = True
         self.param_model.theta[n] = new_theta
@@ -629,6 +637,7 @@ class GaussianModel:
         """
         self.model_sett = run_sett["models"]["LinearMDP"]
         self.d = self.model_sett["d"]
+        self.overflow = False
         if isinstance(self.model_sett["init_theta"][0][0], str):
             self.theta = np.array(
                 [
@@ -647,6 +656,7 @@ class GaussianModel:
 
         This function applies the softmax function to convert logits to probability
         distributions. The softmax ensures the output sums to 1 and all values are positive.
+        Uses numerically stable implementation to prevent overflow.
 
         Parameters
         ----------
@@ -655,10 +665,16 @@ class GaussianModel:
 
         Returns
         -------
-        np.ndarray
-            Softmax output of shape (d,) representing probability distribution.
+        np.ndarray or None
+            Softmax output of shape (d,) representing probability distribution, or None if overflow occurs.
         """
+        # Try original softmax first
         e = np.exp(w)
+
+        # Check for overflow (inf values)
+        if np.any(np.isinf(e)):
+            self.overflow = True
+            return
         return e / e.sum()
 
     def inverse_softmax(self, theta):

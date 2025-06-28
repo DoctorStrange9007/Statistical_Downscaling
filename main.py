@@ -26,11 +26,11 @@ if __name__ == "__main__":
     mdp = LinearMDP(run_sett, param_model=param_model, trans_kernel=trans_kernel)
 
     lr_rate = run_sett["lr_rate"]
-    mdp.gd(lr=lr_rate, save_results=False)
+    mdp.gd(lr=lr_rate, save_results=True)
 
     print("Creating theta convergence plots...")
     plot_theta_pairs(
         run_sett["output_dir"],
         true_theta=run_sett["models"]["LinearMDP"]["true_theta"],
-        save_plot=False,
+        save_plot=True,
     )
