@@ -2,6 +2,7 @@ import numpy as np
 from scipy.stats import multivariate_normal
 import pandas as pd
 import os
+from src.utils import plot_theta_periodically
 
 
 class LinearMDP:
@@ -41,7 +42,7 @@ class LinearMDP:
         self.converged = [False] * (self.N + 1)
         self.theta_history = []
 
-    def gd(self, lr, save_results=False):
+    def gd(self, l_rates, save_results=False, save_frequency=5):
         """
         Run gradient descent optimization for all time steps in the MDP.
 
@@ -51,10 +52,12 @@ class LinearMDP:
 
         Parameters
         ----------
-        lr : float
-            Learning rate for gradient descent updates.
+        l_rates : list
+            List of learning rates for gradient descent updates.
         save_results : bool, optional
             Whether to save results to Excel file (default: False).
+        save_frequency : int, optional
+            How often to save results and plot (every N steps) (default: 5).
         """
         N = self.N
         nr_gd_steps = self.nr_gd_steps
@@ -70,13 +73,20 @@ class LinearMDP:
 
         print(self.param_model.theta)
         for t in range(nr_gd_steps):
-            for n in range(N + 1):
+            for n in range(N, -1, -1):  # n = N, N-1, ..., 0
                 if n == 0:
                     if not self.converged[0]:
-                        self.gd_0(lr)
+                        self.gd_0(l_rates[0])
                 else:
                     if not self.converged[n]:
-                        self.gd_n(lr, n)
+                        self.gd_n(l_rates[n], n)
+
+            print(t)
+            print("theta")
+            print("--------------------------------")
+            print(self.param_model.theta)
+            print("--------------------------------")
+
             # Record theta values at this step
             if save_results:
                 step_data = {"gd_step": t}
@@ -86,16 +96,22 @@ class LinearMDP:
                         step_data[col_name] = theta_val
                 self.theta_history.append(step_data)
 
-            print(t)
-            print("theta")
-            print("--------------------------------")
-            print(self.param_model.theta)
-            print("--------------------------------")
+                # Save and plot every 5 steps
+                if t % save_frequency == 0 and t != 0:
+                    self.save_results()
+                    plot_theta_periodically(
+                        self.theta_history,
+                        self.run_sett["output_dir"],
+                        self.run_sett["models"]["LinearMDP"]["true_theta"],
+                    )
+
             if np.all(self.converged):
                 print("Converged")
                 if save_results:
                     self.save_results()
                 break
+
+        # Final save
         if save_results:
             self.save_results()
 
