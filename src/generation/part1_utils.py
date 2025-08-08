@@ -2,7 +2,6 @@ import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
 from functools import partial
 from typing import Callable
 import numpy as np
@@ -90,29 +89,8 @@ def sde_solver_backwards_cond(
         # Now we run the kernel using Euler-Maruyama
         disp = g(1 - t)
         t = jnp.ones((x.shape[0], 1)) * t
-
-        # Use jax.pure_callback to call TensorFlow function from within JIT
-        def grad_log_h_wrapper(x, t):
-            # This function will be called on the host (outside JIT)
-            # Convert JAX arrays to numpy, call TensorFlow function, convert back
-            x_np = np.array(x)
-            t_np = np.array(t)
-
-            # Convert numpy arrays to TensorFlow tensors
-            x_tf = tf.convert_to_tensor(x_np, dtype=tf.float32)
-            t_tf = tf.convert_to_tensor(t_np, dtype=tf.float32)
-
-            # Call TensorFlow function
-            result = grad_log_h(x_tf, t_tf)
-
-            # Convert back to numpy, then to JAX
-            result_np = np.array(result)
-            return jnp.array(result_np)
-
-        # Use pure_callback to call the wrapper function
-        grad_log_h_result = jax.pure_callback(
-            grad_log_h_wrapper, jax.ShapeDtypeStruct(x.shape, x.dtype), x, 1 - t
-        )
+        # Directly call JAX-native grad_log_h
+        grad_log_h_result = grad_log_h(x, 1 - t)
 
         drift = (
             -f(x, 1 - t) + grad_log(x, 1 - t) * disp**2 + grad_log_h_result * disp**2

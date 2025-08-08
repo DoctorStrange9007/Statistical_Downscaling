@@ -8,7 +8,7 @@ general:
   dt: 0.001
   T: 1
   beta_min: 0.001
-  beta_max: 3
+  beta_max: 3 #19.9 -- likely have to increase this when working with uncentered data. 
 pde_solver:
   C:
     - [1, 0, 0]

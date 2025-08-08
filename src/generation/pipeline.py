@@ -3,7 +3,6 @@ import os
 import jax
 from pre_trained_model import HR_data, HR_prior
 from PDE_solver import PDE_solver
-import DGM
 import part1_utils as utils
 
 if __name__ == "__main__":
@@ -13,20 +12,23 @@ if __name__ == "__main__":
     if not os.path.exists(run_sett["output_dir"]):
         os.makedirs(run_sett["output_dir"])
 
-    hr_data = HR_data(run_sett)
+    # Master RNG: use general.seed if present; else fixed
+    seed = run_sett.get("general", {}).get("seed", 37)
+    master_key = jax.random.PRNGKey(seed)
+    key_data, key_prior, key_pde, key_sde = jax.random.split(master_key, 4)
+
+    hr_data = HR_data(run_sett, rng_key=key_data)
     samples = hr_data.get_samples()
     utils.plot_samples(samples, run_sett["output_dir"], "samples.png")
 
-    hr_prior = HR_prior(samples, run_sett)
+    hr_prior = HR_prior(samples, run_sett, rng_key=key_prior)
     hr_prior.train()
-    model = DGM.DGMNet(run_sett)
-    # The PDE_solver constructor will automatically wrap hr_prior.trained_score
-    pde_solver = PDE_solver(model, hr_prior.trained_score, samples, run_sett)
+    # Use JAX-based DGMNetJax internally via PDE_solver
+    pde_solver = PDE_solver(hr_prior.trained_score, samples, run_sett, rng_key=key_pde)
     pde_solver.train()
 
-    key = jax.random.PRNGKey(37)
     x_1, samples_after = utils.sde_solver_backwards_cond(
-        key,
+        key_sde,
         hr_prior.trained_score,
         pde_solver.grad_log_h,
         hr_prior.g,
