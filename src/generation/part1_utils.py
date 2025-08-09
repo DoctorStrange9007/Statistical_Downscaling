@@ -93,7 +93,9 @@ def sde_solver_backwards_cond(
         grad_log_h_result = grad_log_h(x, 1 - t)
 
         drift = (
-            -f(x, 1 - t) + grad_log(x, 1 - t) * disp**2 + grad_log_h_result * disp**2
+            -f(x, 1 - t)
+            + grad_log(x, 1 - t) * disp**2
+            + 100 * grad_log_h_result * disp**2
         )
         x = (
             x
