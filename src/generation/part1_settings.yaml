@@ -19,7 +19,7 @@ pde_solver:
   nSim_terminal: 2000
   x_high: 1.5
   x_multiplier: 1.5
-  sampling_stages: 100 #100
+  sampling_stages: 10 #100
   steps_per_sample: 10
   learning_rate: 0.001
 pre_trained:

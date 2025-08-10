@@ -16,7 +16,7 @@ def plot_samples(samples, output_dir, name):
     plt.savefig(output_dir + name)
 
 
-@partial(jax.jit, static_argnums=(1, 2, 3, 4, 5, 6, 7, 8, 10))
+@partial(jax.jit, static_argnums=(1, 2, 3, 4, 5, 6, 7, 8, 9, 11))
 def sde_solver_backwards_cond(
     key: jax.Array,
     grad_log: Callable[[jax.Array], jax.Array],
@@ -27,6 +27,7 @@ def sde_solver_backwards_cond(
     n_samples: int,
     T: int,
     sigma2: Callable[[jax.Array], jax.Array],
+    s: Callable[[jax.Array], jax.Array],
     ts: jax.Array = jnp.arange(1, 1000) / (1000 - 1),
     conditional: bool = True,
 ) -> jax.Array:
@@ -74,7 +75,8 @@ def sde_solver_backwards_cond(
     dts = ts[1:] - ts[:-1]
     params_time = jnp.stack([ts[:-1], dts], axis=1)
     # Sampling the terminal condition with the correct std.
-    x_1 = jnp.sqrt(sigma2(T)) * jax.random.normal(subkey, shape=(n_samples, d))
+    den = jnp.clip(s(T) ** 2, 1e-12, None)
+    x_1 = jnp.sqrt(sigma2(T) / den) * jax.random.normal(subkey, shape=(n_samples, d))
     carry = (key, x_1)
     (_, samples), _ = jax.lax.scan(lmc_step_with_kernel, carry, params_time)
     return x_1, samples
