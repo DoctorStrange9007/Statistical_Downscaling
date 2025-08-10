@@ -19,7 +19,7 @@ pde_solver:
   nSim_terminal: 2000
   x_high: 1.5
   x_multiplier: 1.5
-  sampling_stages: 10 #100
+  sampling_stages: 100 #100
   steps_per_sample: 10
   learning_rate: 0.001
 pre_trained:
@@ -30,7 +30,7 @@ pre_trained:
     nodes_per_layer: 50
     num_layers: 3
     learning_rate: 0.001
-    N_epochs: 100 #3_000
+    N_epochs: 3_000 #3_000
     batch_size: 20
 
 

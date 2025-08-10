@@ -86,7 +86,7 @@ class StatisticalDownscalingPDESolver(PDE_solver):
 
         # Terminal condition loss (preserved from existing code)
         V_term = self.net.apply(params, t_terminal, x_terminal)
-        diff = x_terminal @ self.C.T - jnp.array([0.4, 0.6])
+        diff = x_terminal @ self.C.T - jnp.array([0.0111358, 0.56246203])
         target = jnp.exp(-jnp.linalg.norm(diff, axis=1, ord=2)).reshape(-1, 1)
         L3 = jnp.mean(jnp.square(V_term - target))
 
