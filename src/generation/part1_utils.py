@@ -75,8 +75,7 @@ def sde_solver_backwards_cond(
     dts = ts[1:] - ts[:-1]
     params_time = jnp.stack([ts[:-1], dts], axis=1)
     # Sampling the terminal condition with the correct std.
-    den = jnp.clip(s(T) ** 2, 1e-12, None)
-    x_1 = jnp.sqrt(sigma2(T) / den) * jax.random.normal(subkey, shape=(n_samples, d))
+    x_1 = jnp.sqrt(sigma2(T)) * jax.random.normal(subkey, shape=(n_samples, d))
     carry = (key, x_1)
     (_, samples), _ = jax.lax.scan(lmc_step_with_kernel, carry, params_time)
     return x_1, samples

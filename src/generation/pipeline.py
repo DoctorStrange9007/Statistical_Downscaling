@@ -63,7 +63,7 @@ if __name__ == "__main__":
         run_sett["general"]["T"],
         hr_prior.sigma2,
         hr_prior.s,
-        conditional=False,
+        conditional=True,
     )  # 2however, doesn't seem to translate to the samples we generate.
 
     utils.plot_samples(samples_after, run_sett["output_dir"], "samples_after.png")

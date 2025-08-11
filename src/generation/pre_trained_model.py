@@ -164,9 +164,11 @@ class HR_prior:
     def s(self, t: jax.Array) -> jax.Array:
         return jnp.exp(-0.5 * self.int_beta(t))
 
-    # V[x_t|x_0] needed for tweedie's formula for the score function
-    def sigma2(self, t: jax.Array) -> jax.Array:
+    def s2sigma2(self, t: jax.Array) -> jax.Array:
         return 1 - jnp.exp(-self.int_beta(t))
+
+    def sigma2(self, t: jax.Array) -> jax.Array:
+        return jnp.exp(self.int_beta(t)) - 1
 
     def loss_fn(
         self, params: PyTree, model: nn.Module, rng: jax.Array, batch: jax.Array
@@ -190,7 +192,7 @@ class HR_prior:
             num_steps - 1
         )
         # Extract the standard deviation from the schedule.
-        std = jnp.sqrt(self.sigma2(t) / self.s(t) ** 2)
+        std = jnp.sqrt(self.sigma2(t))
         rng, step_rng = jax.random.split(rng)
         noise = jax.random.normal(step_rng, batch.shape)
         xt = batch + noise * std
@@ -251,8 +253,8 @@ class HR_prior:
 
     def trained_score(self, x, t):
         x_t = x / self.s(t)
-        std = jnp.sqrt(self.sigma2(t) / self.s(t) ** 2)
+        std = jnp.sqrt(self.sigma2(t))
 
         return (self.s(t) * self.denoiser.apply(self.params, x_t, std) - x) / (
-            self.sigma2(t) + 1e-6
+            self.s2sigma2(t) + 1e-6
         )
