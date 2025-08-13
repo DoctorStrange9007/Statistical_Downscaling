@@ -29,13 +29,12 @@ class StatisticalDownscalingPDESolver(PDE_solver):
         self.grad_log = grad_log  # Callable: (x, t) -> grad log p(x, t)
         self.C = jnp.array(settings["pde_solver"]["C"], dtype=jnp.float32)
         # Training-time y extracted from samples
-        self.y = jnp.array(
-            samples @ np.array(settings["pde_solver"]["C"]).T, dtype=jnp.float32
-        )
+        self.y_target = jnp.array(settings["pde_solver"]["y_target"], dtype=jnp.float32)
 
         # Beta schedule parameters
         self.beta_min = float(settings["general"]["beta_min"])
         self.beta_max = float(settings["general"]["beta_max"])
+        self.lambda_ = float(settings["pde_solver"]["lambda"])
 
     # Diffusion schedule and drifts for the OU-like SDE
     def beta(self, t: jax.Array) -> jax.Array:
@@ -86,8 +85,12 @@ class StatisticalDownscalingPDESolver(PDE_solver):
 
         # Terminal condition loss (preserved from existing code)
         V_term = self.net.apply(params, t_terminal, x_terminal)
-        diff = x_terminal @ self.C.T - jnp.array([0.0111358, 0.56246203])
-        target = jnp.exp(-jnp.linalg.norm(diff, axis=1, ord=2)).reshape(-1, 1)
+        diff = (
+            x_terminal @ self.C.T - self.y_target
+        )  # jnp.array([0.0111358, 0.56246203])
+        target = (1 / self.lambda_) * jnp.exp(
+            (-jnp.linalg.norm(diff, axis=1, ord=2)) / (self.lambda_**2)
+        ).reshape(-1, 1)
         L3 = jnp.mean(jnp.square(V_term - target))
 
         return L1, L3, (L1 + L3)

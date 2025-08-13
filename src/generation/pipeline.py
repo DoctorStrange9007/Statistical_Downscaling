@@ -40,10 +40,8 @@ if __name__ == "__main__":
 
     # Also evaluate the network output V(samples, T)
     V_T = pde_solver.V(pde_solver.params, t_T, samples)
-    print("V(samples, T) shape:", V_T.shape)
-    print("First 10 V(samples, T):", V_T[:10].reshape(-1))
     diff = samples @ jnp.array(run_sett["pde_solver"]["C"]).T - jnp.array(
-        [0.0111358, 0.56246203]
+        run_sett["pde_solver"]["y_target"], dtype=jnp.float32
     )
     mae_to_target = jnp.mean(
         jnp.square(V_T - jnp.exp(-jnp.linalg.norm(diff, axis=1, ord=2)).reshape(-1, 1))
@@ -67,5 +65,5 @@ if __name__ == "__main__":
     )  # 2however, doesn't seem to translate to the samples we generate.
 
     utils.plot_samples(samples_after, run_sett["output_dir"], "samples_after.png")
-    print(samples_after)
+    utils.print_distances(samples, samples_after, run_sett)
     a = 5

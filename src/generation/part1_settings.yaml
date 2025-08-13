@@ -22,6 +22,10 @@ pde_solver:
   sampling_stages: 100 #100
   steps_per_sample: 10
   learning_rate: 0.001
+  y_target:
+    - 0.0
+    - 0.5
+  lambda: 1.0
 pre_trained:
   data:
     batch_size: 50
