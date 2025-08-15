@@ -64,37 +64,19 @@ class LinearMDP:
 
         # Add initial theta values as first row
         if save_results:
-            init_data = {"gd_step": -1}  # Use -1 to indicate initial values
-            for i, theta_row in enumerate(self.param_model.theta):
-                for j, theta_val in enumerate(theta_row):
-                    col_name = f"theta_{i}_{j}"
-                    init_data[col_name] = theta_val
-            self.theta_history.append(init_data)
+            self._record_theta(step=-1)
 
         print(self.param_model.theta)
         for t in range(nr_gd_steps):
             for n in range(N, -1, -1):  # n = N, N-1, ..., 0
-                if n == 0:
-                    if not self.converged[0]:
-                        self.gd_0(l_rates[0])
-                else:
-                    if not self.converged[n]:
-                        self.gd_n(l_rates[n], n)
+                if not self.converged[n]:
+                    self.gd_n(l_rates[n], n) if n != 0 else self.gd_0(l_rates[0])
 
-            print(t)
-            print("theta")
-            print("--------------------------------")
-            print(self.param_model.theta)
-            print("--------------------------------")
+            print(f"GD step {t}: theta=\n{self.param_model.theta}")
 
             # Record theta values at this step
             if save_results:
-                step_data = {"gd_step": t}
-                for i, theta_row in enumerate(self.param_model.theta):
-                    for j, theta_val in enumerate(theta_row):
-                        col_name = f"theta_{i}_{j}"
-                        step_data[col_name] = theta_val
-                self.theta_history.append(step_data)
+                self._record_theta(step=t)
 
             # Optional logging callback (e.g., to W&B)
             if log_fn is not None:
@@ -108,14 +90,14 @@ class LinearMDP:
                 except Exception:
                     pass
 
-                # Save and plot every 5 steps
-                if t % save_frequency == 0 and t != 0:
-                    self.save_results()
-                    plot_theta_periodically(
-                        self.theta_history,
-                        self.run_sett["output_dir"],
-                        self.run_sett["models"]["LinearMDP"]["true_theta"],
-                    )
+            # Save and plot every save_frequency steps (if enabled)
+            if save_results and (t % save_frequency == 0 and t != 0):
+                self.save_results()
+                plot_theta_periodically(
+                    self.theta_history,
+                    self.run_sett["output_dir"],
+                    self.run_sett["models"]["LinearMDP"]["true_theta"],
+                )
 
             if np.all(self.converged):
                 print("Converged")
@@ -126,6 +108,14 @@ class LinearMDP:
         # Final save
         if save_results:
             self.save_results()
+
+    def _record_theta(self, step: int) -> None:
+        """Append current theta matrix to history in a flat keyed dict."""
+        step_data = {"gd_step": int(step)}
+        for i, theta_row in enumerate(self.param_model.theta):
+            for j, theta_val in enumerate(theta_row):
+                step_data[f"theta_{i}_{j}"] = float(theta_val)
+        self.theta_history.append(step_data)
 
     def save_results(self):
         """
@@ -146,12 +136,7 @@ class LinearMDP:
         lr : float
             Learning rate for GD update.
         """
-        grad = self.compute_gradient_0()
-        self.param_model.w[0] -= lr * grad
-        new_theta = self.param_model.batched_softmax(self.param_model.w[0])
-        if np.allclose(new_theta, self.param_model.theta[0], rtol=0, atol=1e-5):
-            self.converged[0] = True
-        self.param_model.theta[0] = new_theta
+        self._apply_gd_step(n=0, lr=lr)
 
     def gd_n(self, lr, n):
         """
@@ -164,7 +149,11 @@ class LinearMDP:
         n : int
             Time step index.
         """
-        grad = self.compute_gradient_n(n)
+        self._apply_gd_step(n=n, lr=lr)
+
+    def _apply_gd_step(self, n: int, lr: float) -> None:
+        """Apply one GD step to theta[n] using appropriate gradient."""
+        grad = self.compute_gradient_0() if n == 0 else self.compute_gradient_n(n)
         self.param_model.w[n] -= lr * grad
         new_theta = self.param_model.batched_softmax(self.param_model.w[n])
         if np.allclose(new_theta, self.param_model.theta[n], rtol=0, atol=1e-5):
@@ -666,7 +655,7 @@ class GaussianModel:
                 dtype=float,
             )
         else:
-            self.theta = np.array(self.model_sett["init_theta"])
+            self.theta = np.array(self.model_sett["init_theta"], dtype=float)
         self.w = self.inverse_softmax(self.theta)
 
     def batched_softmax(self, w):
@@ -711,6 +700,7 @@ class GaussianModel:
         np.ndarray
             Logits of shape (N, d) or (d,) with mean-zero constraint.
         """
+        theta = np.maximum(theta, 1e-12)
         w = np.log(theta)
 
         # Make it mean-zero to fix identifiability
@@ -777,17 +767,14 @@ class GaussianModel:
         d = self.d
 
         trajectories = np.zeros((k + 1, 2, d))
-        for n in range(k + 1):
-            if n == 0:
-                y0, y0_prime = self.get_ypair(n=0)
-                trajectories[n, 0, :] = y0
-                trajectories[n, 1, :] = y0_prime
-            else:
-                y_prev = trajectories[n - 1, 0, :]
-                y_prev_prime = trajectories[n - 1, 1, :]
-                y, y_prime = self.get_ypair(n=n, ynm1=y_prev, ynm1_prime=y_prev_prime)
-                trajectories[n, 0, :] = y
-                trajectories[n, 1, :] = y_prime
+        # initialize at n=0
+        y0, y0_prime = self.get_ypair(n=0)
+        trajectories[0, 0, :], trajectories[0, 1, :] = y0, y0_prime
+        # propagate for n=1..k
+        for n in range(1, k + 1):
+            y_prev, y_prev_prime = trajectories[n - 1, 0, :], trajectories[n - 1, 1, :]
+            y, y_prime = self.get_ypair(n=n, ynm1=y_prev, ynm1_prime=y_prev_prime)
+            trajectories[n, 0, :], trajectories[n, 1, :] = y, y_prime
 
         return trajectories
 
@@ -1136,7 +1123,7 @@ class GaussianKernel:
                 dtype=float,
             )
         else:
-            self.true_theta = np.array(self.model_sett["true_theta"])
+            self.true_theta = np.array(self.model_sett["true_theta"], dtype=float)
 
     def MVNMixture_rvs(self, components, n):
         """
@@ -1179,9 +1166,7 @@ class GaussianKernel:
         """
         d = self.d
 
-        return np.dot(
-            self.true_theta[n], np.array([components[i].pdf(value) for i in range(d)])
-        )
+        return float(np.dot(self.true_theta[n], [c.pdf(value) for c in components]))
 
     def m_0_objects(self):
         """
