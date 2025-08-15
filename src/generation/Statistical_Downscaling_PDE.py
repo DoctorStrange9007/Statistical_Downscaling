@@ -23,6 +23,14 @@ class StatisticalDownscalingPDESolver(PDE_solver):
         settings: dict,
         rng_key: jax.Array | None = None,
     ):
+        """Initialize the statistical downscaling PDE solver.
+
+        Args:
+            grad_log: Callable `(x, t) -> grad log p(x, t)` defining the score.
+            samples: Training samples used for constructing constraints.
+            settings: Hierarchical settings dictionary.
+            rng_key: Optional PRNG key for deterministic initialization.
+        """
         super().__init__(settings=settings, rng_key=rng_key)
 
         # Problem-specific attributes
@@ -40,20 +48,31 @@ class StatisticalDownscalingPDESolver(PDE_solver):
 
     # Diffusion schedule and drifts for the OU-like SDE
     def beta(self, t: jax.Array) -> jax.Array:
+        """Linear diffusion schedule β(t)."""
         return self.beta_min + t * (self.beta_max - self.beta_min)
 
     def f(self, x: jax.Array, t: jax.Array) -> jax.Array:
+        """Drift for forward SDE: f(x, t) = -0.5 β(t) x."""
         return -0.5 * self.beta(t) * x
 
     def g(self, t: jax.Array) -> jax.Array:
+        """Diffusion magnitude g(t) = sqrt(β(t))."""
         return jnp.sqrt(self.beta(t))
 
     def b_bar(self, t: jax.Array, x: jax.Array) -> jax.Array:
+        """Reverse-time SDE drift component b̄(t, x)."""
         disp = self.g(self.T - t)
         return -self.f(x, self.T - t) + self.grad_log(x, self.T - t) * (disp**2)
 
     @partial(jax.jit, static_argnums=0)
     def loss_fn(self, params, t_interior, x_interior, t_terminal, x_terminal):
+        """Compute PDE residual and terminal losses for downscaling.
+
+        Returns:
+            Tuple `(L1, L3, total)` where `L1` is interior residual MSE and
+            `L3` enforces the terminal constraint via a smooth kernel.
+        """
+
         # Per-sample scalar V for gradient/hessian computations
         def V_single(ts: jax.Array, xs: jax.Array) -> jax.Array:
             ts_b = ts.reshape(1, 1)

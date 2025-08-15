@@ -10,6 +10,15 @@ class LSTMLayerJax(nn.Module):
 
     @nn.compact
     def __call__(self, S: jax.Array, X: jax.Array) -> jax.Array:
+        """One recurrent block used in Deep Galerkin Networks.
+
+        Args:
+            S: Hidden state tensor of shape `(B, output_dim)`.
+            X: Input tensor of shape `(B, input_dim)`; here usually `[t, x]`.
+
+        Returns:
+            Updated hidden state tensor `(B, output_dim)`.
+        """
         glorot = nn.initializers.glorot_uniform()
         Uz = self.param("Uz", glorot, (self.input_dim, self.output_dim))
         Ug = self.param("Ug", glorot, (self.input_dim, self.output_dim))
@@ -41,6 +50,14 @@ class DenseLayerJax(nn.Module):
 
     @nn.compact
     def __call__(self, X: jax.Array) -> jax.Array:
+        """Affine + optional nonlinearity layer.
+
+        Args:
+            X: Input tensor `(B, input_dim)`.
+
+        Returns:
+            Tensor `(B, output_dim)` after linear layer and optional activation.
+        """
         W = self.param(
             "W", nn.initializers.glorot_uniform(), (self.input_dim, self.output_dim)
         )
@@ -61,6 +78,15 @@ class DGMNetJax(nn.Module):
 
     @nn.compact
     def __call__(self, t: jax.Array, x: jax.Array) -> jax.Array:
+        """Forward pass of a Deep Galerkin Network (DGM) in JAX/Flax.
+
+        Args:
+            t: Time inputs `(B, 1)`.
+            x: Spatial inputs `(B, d)`.
+
+        Returns:
+            Scalar output `(B, 1)` implementing an approximation to the PDE solution.
+        """
         X = jnp.concatenate([t, x], axis=1)
         S = DenseLayerJax(self.input_dim + 1, self.layer_width, transformation="tanh")(
             X

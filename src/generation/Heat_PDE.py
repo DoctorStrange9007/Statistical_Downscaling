@@ -9,7 +9,16 @@ except ImportError:
 
 
 def make_heat_settings(d: int, T: float, sampling_stages: int = 50) -> dict:
-    """Minimal settings required by the base solver for the heat PDE."""
+    """Minimal settings required by the base solver for the heat PDE.
+
+    Args:
+        d: Spatial dimension.
+        T: Final time horizon.
+        sampling_stages: Number of outer sampling stages used during training.
+
+    Returns:
+        Settings dictionary consumable by `PDE_solver` and `HeatPDESolver`.
+    """
     return {
         "general": {"d": d, "T": T},
         "pde_solver": {
@@ -42,6 +51,14 @@ class HeatPDESolver(PDE_solver):
         settings: dict,
         rng_key: jax.Array | None = None,
     ):
+        """Initialize the heat PDE solver.
+
+        Args:
+            a_vec: Weight vector of shape `(d,)`.
+            sigma: Constant diffusion coefficient.
+            settings: Settings dictionary produced by `make_heat_settings` or similar.
+            rng_key: Optional PRNG key for deterministic initialization.
+        """
         d = int(settings["general"]["d"])
         assert a_vec.shape == (d,), "a_vec must have shape (d,)"
         self.a_vec = a_vec
@@ -50,6 +67,13 @@ class HeatPDESolver(PDE_solver):
 
     @partial(jax.jit, static_argnums=0)
     def loss_fn(self, params, t_interior, x_interior, t_terminal, x_terminal):
+        """Compute PDE interior residual loss and terminal loss.
+
+        Returns:
+            Tuple `(L1, L3, total)` where `L1` is interior PDE residual MSE,
+            `L3` is terminal MSE, and `total = L1 + L3`.
+        """
+
         # Per-sample scalar V for gradient/hessian computations
         def V_single(ts: jax.Array, xs: jax.Array) -> jax.Array:
             ts_b = ts.reshape(1, 1)
@@ -77,6 +101,15 @@ class HeatPDESolver(PDE_solver):
 
     @partial(jax.jit, static_argnums=0)
     def exact_solution(self, t: jax.Array, x: jax.Array) -> jax.Array:
+        """Closed-form solution to the backward heat equation for this setup.
+
+        Args:
+            t: Time tensor `(B, 1)`.
+            x: Spatial tensor `(B, d)`.
+
+        Returns:
+            Exact solution `V(t, x)` as `(B, 1)` tensor.
+        """
         aTx = x @ self.a_vec.reshape(-1, 1)
         return jnp.exp(
             aTx + 0.5 * (self.sigma**2) * (jnp.sum(self.a_vec**2)) * (self.T - t)

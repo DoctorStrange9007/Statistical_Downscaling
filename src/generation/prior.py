@@ -14,6 +14,15 @@ class Denoiser(nn.Module):
 
     @nn.compact
     def __call__(self, x, sigma):
+        """Forward pass of the denoiser network.
+
+        Args:
+            x: Input batch `(B, d)`.
+            sigma: Noise level features `(B, 1)` used to build embeddings.
+
+        Returns:
+            Denoised batch `(B, d)`.
+        """
         in_size = x.shape[1]
         n_hidden = 256
         sigma = jnp.concatenate(
@@ -39,6 +48,12 @@ class Denoiser(nn.Module):
 
 class HR_data:
     def __init__(self, settings, rng_key: jax.Array | None = None):
+        """Data generator for high-resolution samples via forward SDE.
+
+        Args:
+            settings: Settings dict containing beta schedule, batch sizes, dt, T, d.
+            rng_key: Optional PRNG key for reproducibility.
+        """
         self.beta_min = float(settings["general"]["beta_min"])
         self.beta_max = float(settings["general"]["beta_max"])
         self.T = float(settings["general"]["T"])
@@ -59,7 +74,7 @@ class HR_data:
         T: float,
         return_trajectory: bool = False,
     ) -> jax.Array:
-        """Solver for the forward equation using Euler-Maruyama.
+        """Solver for the forward SDE using Euler-Maruyama.
 
         Args:
             key: Random seed.
@@ -96,18 +111,50 @@ class HR_data:
             return samples
 
     def p(self, x, t):
+        """Toy target density used for sample generation.
+
+        Args:
+            x: State `(B, d)`.
+            t: Time scalar or `(B, 1)`; unused in this example.
+
+        Returns:
+            Unnormalized density values `(B,)`.
+        """
         return jnp.exp(-jnp.abs(jnp.sum(jnp.square(x)) - 1.0))
 
     def sigma_noise(self, t):
+        """Noise magnitude schedule for the forward SDE.
+
+        Args:
+            t: Time array.
+
+        Returns:
+            Noise standard deviation at time `t`.
+        """
         return 0.0 * t + jnp.sqrt(2) * 0.001
 
     def logp(self, x, t):
+        """Log-density corresponding to `p(x, t)`.
+
+        Args:
+            x: State `(B, d)`.
+            t: Time.
+
+        Returns:
+            Log-density values `(B,)`.
+        """
         return jnp.log(self.p(x, t))
 
     def nablaV(self, x, t):
+        """Score function ∇ₓ log p(x, t)."""
         return jax.grad(self.logp, argnums=0)(x, t)
 
     def get_samples(self):
+        """Generate a batch of samples from the forward SDE.
+
+        Returns:
+            Array of shape `(n_samples, d)` with final-time samples.
+        """
         sampler_vectorized = jax.vmap(
             partial(
                 HR_data.euler_maruyama_solver,
@@ -127,6 +174,13 @@ class HR_data:
 
 class HR_prior:
     def __init__(self, samples, settings, rng_key: jax.Array | None = None):
+        """Prior model trained to approximate the score of the data distribution.
+
+        Args:
+            samples: Training samples `(N, d)`.
+            settings: Settings dict with model hyperparameters.
+            rng_key: Optional PRNG key.
+        """
         self.samples = samples
         self.d = settings["general"]["d"]
         self.dt = settings["general"]["dt"]
@@ -149,41 +203,46 @@ class HR_prior:
 
     # f,g not necessary here but just to indicate where the s(), sigma2 come from.
     def f(self, x: jax.Array, t: jax.Array) -> jax.Array:
+        """Drift for forward SDE: f(x, t) = -0.5 * β(t) * x."""
         return -0.5 * self.beta(t) * x
 
     def g(self, t: jax.Array) -> jax.Array:
+        """Diffusion magnitude: g(t) = sqrt(β(t))."""
         return jnp.sqrt(self.beta(t))
 
     def beta(self, t: jax.Array) -> jax.Array:
+        """Linear beta schedule between `beta_min` and `beta_max`."""
         return self.beta_min + t * (self.beta_max - self.beta_min)
 
     def int_beta(self, t: jax.Array) -> jax.Array:
-        """Integral of beta from 0 to t."""
+        """Integral of β(t) from 0 to t."""
         return t * self.beta_min + 0.5 * t**2 * (self.beta_max - self.beta_min)
 
     def s(self, t: jax.Array) -> jax.Array:
+        """Scaling schedule s(t) = exp(-0.5 * ∫ beta)."""
         return jnp.exp(-0.5 * self.int_beta(t))
 
     def s2sigma2(self, t: jax.Array) -> jax.Array:
+        """Helper returning s^2(t) = 1 - exp(-∫ beta)."""
         return 1 - jnp.exp(-self.int_beta(t))
 
     def sigma2(self, t: jax.Array) -> jax.Array:
+        """Variance schedule sigma^2(t) = exp(∫ beta) - 1."""
         return jnp.exp(self.int_beta(t)) - 1
 
     def loss_fn(
         self, params: PyTree, model: nn.Module, rng: jax.Array, batch: jax.Array
     ) -> jax.Array:
-        """loss function to be used to train the model
+        """Loss function for denoiser training.
 
         Args:
-            params: the current weights of the model
-            model: the score function
-            rng: random number generator from jax
-            batch: a batch of samples from the training data, representing samples
-                from mu_text{data}, shape (J, N)
+            params: Current weights of the model.
+            model: The score function (denoiser) module.
+            rng: JAX PRNG key.
+            batch: A batch of samples `(B, d)`.
 
         Returns:
-            The value of the loss function defined above.
+            Scalar loss value.
         """
         num_steps = int(self.T / self.dt)
         rng, step_rng = jax.random.split(rng)
@@ -209,10 +268,9 @@ class HR_prior:
         opt_state: optax.OptState,
         model: nn.Module,
     ) -> tuple[jax.Array, PyTree, optax.OptState]:
-        """Updates the parameters based on the gradient of the loss function.
+        """One optimizer update step for the denoiser.
 
-        Takes the gradient of the loss function and updates the model weights
-        (params) using it.
+        Computes the gradient of the loss and applies an optimizer step.
 
         Args:
             params: The current weights of the model.
@@ -223,9 +281,7 @@ class HR_prior:
             model: the score function
 
         Returns:
-        A tuple with the value of the loss function (for metrics), the new parameters
-        and the new
-            optimizer state
+            Tuple `(loss, new_params, new_opt_state)`.
         """
         val, grads = jax.value_and_grad(self.loss_fn)(params, model, rng, batch)
         updates, opt_state = self.optimizer.update(grads, opt_state)
@@ -233,6 +289,11 @@ class HR_prior:
         return val, params, opt_state
 
     def train(self, log_fn=None):
+        """Train the prior model on samples.
+
+        Args:
+            log_fn: Optional callable to log metrics per epoch.
+        """
         for k in tqdm(range(self.N_epochs)):
             self.rng, step_rng = jax.random.split(self.rng)
             # Permutes the data at each epoch, potentially change.
@@ -262,6 +323,15 @@ class HR_prior:
                     pass
 
     def trained_score(self, x, t):
+        """Compute the learned score using the denoiser.
+
+        Args:
+            x: Inputs `(B, d)`.
+            t: Time `(B, 1)`.
+
+        Returns:
+            Estimated score `(B, d)`.
+        """
         x_t = x / self.s(t)
         std = jnp.sqrt(self.sigma2(t))
 

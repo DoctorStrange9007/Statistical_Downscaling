@@ -9,6 +9,13 @@ import numpy as np
 
 
 def plot_samples(samples, output_dir, name):
+    """Create and save a 3D scatter plot of samples.
+
+    Args:
+        samples: Array of shape `(N, 3)` with sample coordinates.
+        output_dir: Directory to write the PNG into.
+        name: File name of the PNG (no path joining performed here).
+    """
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
     ax.scatter(samples[:, 0], samples[:, 1], samples[:, 2], s=3, alpha=0.8)
@@ -37,11 +44,18 @@ def sde_solver_backwards_cond(
     """Euler-Maruyama solver for the backwards SDE.
 
     Args:
-        key: random number generator
-        grad_log: drift term for the SDE (here the score)
-        N: dimension of the problem
-        dt: time step
-        x_0: initial point
+        key: Random number generator key.
+        grad_log: Drift term for the SDE (the score) mapping `(x, t) -> grad log p`.
+        grad_log_h: Conditional drift component from PDE value function.
+        g: Diffusion function.
+        f: Drift function.
+        d: Problem dimension.
+        n_samples: Number of samples to draw.
+        T: Time horizon.
+        sigma2: Variance schedule.
+        s: Scaling schedule.
+        ts: Time grid in (0, T].
+        conditional: If True, includes `grad_log_h` in the drift.
     """
 
     def lmc_step_with_kernel(carry, params_time):
@@ -88,6 +102,15 @@ def sde_solver_backwards_cond(
 
 
 def calculate_msd(samples_after, settings):
+    """Compute mean squared distance from linear constraints Cx=y.
+
+    Args:
+        samples_after: Array `(N, d)` of samples.
+        settings: Settings containing `pde_solver.C` and `pde_solver.y_target`.
+
+    Returns:
+        Scalar mean squared distance.
+    """
 
     diff_after = samples_after @ jnp.array(settings["pde_solver"]["C"]).T - jnp.array(
         settings["pde_solver"]["y_target"]
@@ -98,6 +121,12 @@ def calculate_msd(samples_after, settings):
 
 
 def output_to_excel_and_plot(all_msd, settings):
+    """Write MSD results to Excel and save a line plot.
+
+    Args:
+        all_msd: Mapping of step/key (e.g., lambda) to scalar MSD.
+        settings: Settings dict (used for `output_dir`).
+    """
     # Ensure output directory exists
     output_dir = settings.get("output_dir", "output/")
     os.makedirs(output_dir, exist_ok=True)

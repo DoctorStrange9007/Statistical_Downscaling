@@ -17,6 +17,15 @@ class PDE_solver:
     """
 
     def __init__(self, settings: dict, rng_key: jax.Array | None = None):
+        """Initialize the base PDE solver with common configuration.
+
+        Args:
+            settings: Hierarchical settings containing keys under `general` and
+                `pde_solver` specifying time horizon, sampling sizes, optimizer
+                hyperparameters, spatial bounds, and network size.
+            rng_key: Optional JAX PRNG key for deterministic initialization and
+                sampling. If omitted, a default key is created.
+        """
         # Common settings
         self.t_low = float(settings["pde_solver"]["t_low"])
         self.T = float(settings["general"]["T"])
@@ -53,6 +62,14 @@ class PDE_solver:
 
     # Sampling utilities (use JAX RNG)
     def sampler(self):
+        """Sample interior and terminal training points for the PDE.
+
+        Returns:
+            Tuple `(t_interior, x_interior, t_terminal, x_terminal)` where
+            interior samples are uniform in time over `(t_low, T]` and uniform
+            in space over `[x_low, x_high * x_multiplier]`, and terminal times
+            are fixed at `T`.
+        """
         self.rng, k1, k2, k3 = jax.random.split(self.rng, 4)
         t_interior = jax.random.uniform(
             k1, shape=(self.nSim_interior, 1), minval=self.t_low, maxval=self.T
@@ -75,14 +92,35 @@ class PDE_solver:
     # Value function V(t, x)
     @partial(jax.jit, static_argnums=0)
     def V(self, params, t: jax.Array, x: jax.Array) -> jax.Array:
+        """Evaluate the value network `V(t, x)`.
+
+        Args:
+            params: Network parameters.
+            t: Time tensor of shape `(B, 1)`.
+            x: Spatial tensor of shape `(B, d)`.
+
+        Returns:
+            Tensor of shape `(B, 1)` with the network output.
+        """
         return self.net.apply(params, t, x)
 
     # Subclasses must implement this
     @partial(jax.jit, static_argnums=0)
     def loss_fn(self, params, t_interior, x_interior, t_terminal, x_terminal):
+        """Compute loss terms. Must be implemented by subclasses.
+
+        Returns:
+            A tuple `(L1, L3, total)` of scalar losses.
+        """
         raise NotImplementedError("loss_fn must be implemented by subclasses")
 
     def train(self, log_fn=None):
+        """Train the network using SGD/Adam over sampled batches.
+
+        Args:
+            log_fn: Optional callable that accepts a dictionary of scalar
+                metrics logged once per sampling stage.
+        """
         for i in range(self.sampling_stages):
             t_interior, x_interior, t_terminal, x_terminal = self.sampler()
 
@@ -120,6 +158,16 @@ class PDE_solver:
 
     @partial(jax.jit, static_argnums=0)
     def grad_log_h(self, x: jax.Array, t: jax.Array) -> jax.Array:
+        """Compute gradients of log h(x, t) induced by the current network.
+
+        Args:
+            x: Spatial inputs of shape `(B, d)`.
+            t: Time inputs of shape `(B, 1)`.
+
+        Returns:
+            Tensor of shape `(B, d)` with gradients w.r.t. x.
+        """
+
         def log_h_single(ts: jax.Array, xs: jax.Array) -> jax.Array:
             ts_b = ts.reshape(1, 1)
             xs_b = xs.reshape(1, -1)
