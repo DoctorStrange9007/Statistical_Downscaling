@@ -1,11 +1,7 @@
 import jax
 import jax.numpy as jnp
 from functools import partial
-
-try:
-    from .PDE_solver import PDE_solver
-except ImportError:
-    from PDE_solver import PDE_solver
+from src.generation.PDE_solver import PDE_solver
 
 
 def make_heat_settings(d: int, T: float, sampling_stages: int = 50) -> dict:

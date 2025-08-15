@@ -1,12 +1,19 @@
 import yaml
 import os
+import sys
 import argparse
 from datetime import datetime
 import jax
 import jax.numpy as jnp
-from prior import HR_data, HR_prior
-from Statistical_Downscaling_PDE import StatisticalDownscalingPDESolver
-import utils_generation as utils
+
+# Ensure repository root on path when running this file directly by path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from src.generation.prior import HR_data, HR_prior
+from src.generation.Statistical_Downscaling_PDE import (
+    StatisticalDownscalingPDESolver,
+)
+from src.generation import utils_generation as utils
 
 try:
     import wandb  # type: ignore
@@ -59,23 +66,25 @@ if __name__ == "__main__":
             pass
 
     def log_fn(payload: dict):
+        """Safe metric logger that no-ops if logging is disabled or fails."""
         if use_wandb:
-            wandb.log(payload)
+            try:
+                wandb.log(payload)
+            except Exception:
+                pass
+
+    def log_image(key: str, path: str):
+        """Safe image logger to avoid repeating guards and try/except blocks."""
+        if use_wandb:
+            try:
+                wandb.log({key: wandb.Image(path)})
+            except Exception:
+                pass
 
     hr_data = HR_data(run_sett, rng_key=key_data)
     samples = hr_data.get_samples()
     utils.plot_samples(samples, run_sett["output_dir"], "samples.png")
-    if use_wandb:
-        try:
-            wandb.log(
-                {
-                    "plots/samples": wandb.Image(
-                        os.path.join(run_sett["output_dir"], "samples.png")
-                    )
-                }
-            )
-        except Exception:
-            pass
+    log_image("plots/samples", os.path.join(run_sett["output_dir"], "samples.png"))
 
     hr_prior = HR_prior(samples, run_sett, rng_key=key_prior)
     hr_prior.train(log_fn=log_fn if use_wandb else None)
@@ -114,33 +123,20 @@ if __name__ == "__main__":
         hr_prior.sigma2,
         hr_prior.s,
         conditional=True,
-    )  # 2however, doesn't seem to translate to the samples we generate.
+    )
 
     utils.plot_samples(samples_after, run_sett["output_dir"], "samples_after.png")
-    if use_wandb:
-        try:
-            wandb.log(
-                {
-                    "plots/samples_after": wandb.Image(
-                        os.path.join(run_sett["output_dir"], "samples_after.png")
-                    ),
-                    "lambda": lambda_value,
-                }
-            )
-        except Exception:
-            pass
+    log_image(
+        "plots/samples_after",
+        os.path.join(run_sett["output_dir"], "samples_after.png"),
+    )
+    if lambda_value is not None:
+        log_fn({"lambda": lambda_value})
 
     msd = utils.calculate_msd(samples_after, run_sett)
-    if use_wandb:
-        try:
-            wandb.log(
-                {
-                    "msd/conditional": float(msd),
-                    "lambda": lambda_value,
-                }
-            )
-        except Exception:
-            pass
+    log_fn({"msd/conditional": float(msd)})
+    if lambda_value is not None:
+        log_fn({"lambda": lambda_value})
 
     if run is not None:
         run.finish()

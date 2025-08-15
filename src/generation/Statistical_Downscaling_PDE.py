@@ -2,11 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from functools import partial
-
-try:
-    from .PDE_solver import PDE_solver
-except ImportError:
-    from PDE_solver import PDE_solver
+from src.generation.PDE_solver import PDE_solver
 
 
 class StatisticalDownscalingPDESolver(PDE_solver):

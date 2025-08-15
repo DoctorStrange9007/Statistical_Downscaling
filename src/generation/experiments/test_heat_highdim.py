@@ -98,8 +98,12 @@ if __name__ == "__main__":
             pass
 
     def log_metrics(payload: dict):
+        """Safe metric logger that no-ops if logging is disabled or fails."""
         if use_wandb:
-            wandb.log(payload)
+            try:
+                wandb.log(payload)
+            except Exception:
+                pass
 
     log_cb = log_metrics if use_wandb else None
     solver.train(log_fn=log_cb)

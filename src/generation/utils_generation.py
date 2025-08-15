@@ -23,7 +23,7 @@ def plot_samples(samples, output_dir, name):
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
     ax.set_title("3D Scatter Plot of Samples")
-    plt.savefig(output_dir + name)
+    plt.savefig(os.path.join(output_dir, name))
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4, 5, 6, 7, 8, 9, 11))
@@ -35,12 +35,12 @@ def sde_solver_backwards_cond(
     f: Callable[[jax.Array, jax.Array], jax.Array],
     d: int,
     n_samples: int,
-    T: int,
+    T: float,
     sigma2: Callable[[jax.Array], jax.Array],
     s: Callable[[jax.Array], jax.Array],
     ts: jax.Array = jnp.arange(1, 1000) / (1000 - 1),
     conditional: bool = True,
-) -> jax.Array:
+) -> tuple[jax.Array, jax.Array]:
     """Euler-Maruyama solver for the backwards SDE.
 
     Args:
@@ -56,6 +56,10 @@ def sde_solver_backwards_cond(
         s: Scaling schedule.
         ts: Time grid in (0, T].
         conditional: If True, includes `grad_log_h` in the drift.
+    Returns:
+        Tuple `(x_T, samples)` where:
+        - `x_T`: Terminal initialization `(n_samples, d)` drawn with std `sqrt(sigma2(T))`.
+        - `samples`: Sequence of samples over time with final shape `(n_steps-1, n_samples, d)`.
     """
 
     def lmc_step_with_kernel(carry, params_time):

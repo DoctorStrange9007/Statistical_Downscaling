@@ -63,8 +63,28 @@ if __name__ == "__main__":
             pass
 
     def log_fn(payload: dict):
+        """Safe metric logger that no-ops if logging is disabled or fails."""
         if use_wandb:
-            wandb.log(payload)
+            try:
+                wandb.log(payload)
+            except Exception:
+                pass
+
+    def log_image(key: str, path: str):
+        """Safe image logger to avoid repeating guards and try/except blocks."""
+        if use_wandb:
+            try:
+                wandb.log({key: wandb.Image(path)})
+            except Exception:
+                pass
+
+    def log_table(key: str, df: pd.DataFrame):
+        """Safe table logger from pandas DataFrame."""
+        if use_wandb:
+            try:
+                wandb.log({key: wandb.Table(dataframe=df)})
+            except Exception:
+                pass
 
     param_model = GaussianModel(run_sett)
     trans_kernel = GaussianKernel(run_sett)
@@ -81,20 +101,12 @@ if __name__ == "__main__":
         true_theta=run_sett["models"]["LinearMDP"]["true_theta"],
         save_plot=True,
     )
-    if use_wandb:
-        plot_path = os.path.join(run_sett["output_dir"], "theta_pairs_convergence.png")
-        if os.path.exists(plot_path):
-            try:
-                wandb.log({"plots/theta_pairs": wandb.Image(plot_path)})
-            except Exception:
-                pass
-    if use_wandb:
-        try:
-            # Log the full MSD dictionary as a table for convenience
-            df = pd.DataFrame(mdp.theta_history).sort_values("gd_step")
-            wandb.log({"summary/theta_history": wandb.Table(dataframe=df)})
-        except Exception:
-            pass
+    plot_path = os.path.join(run_sett["output_dir"], "theta_pairs_convergence.png")
+    if os.path.exists(plot_path):
+        log_image("plots/theta_pairs", plot_path)
+    # Log the full theta history as a table for convenience
+    df = pd.DataFrame(mdp.theta_history).sort_values("gd_step")
+    log_table("summary/theta_history", df)
 
     if run is not None:
         run.finish()

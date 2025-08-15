@@ -2,11 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from functools import partial
-
-try:
-    from .DGMJax import DGMNetJax
-except ImportError:  # when run as a script from this folder
-    from DGMJax import DGMNetJax
+from src.generation.DGMJax import DGMNetJax
 
 
 class PDE_solver:
