@@ -2,7 +2,7 @@ import numpy as np
 from scipy.stats import multivariate_normal
 import pandas as pd
 import os
-from src.utils import plot_theta_periodically
+from src.optimal_transport.utils_OT import plot_theta_periodically
 
 
 class LinearMDP:
@@ -42,7 +42,7 @@ class LinearMDP:
         self.converged = [False] * (self.N + 1)
         self.theta_history = []
 
-    def gd(self, l_rates, save_results=False, save_frequency=5):
+    def gd(self, l_rates, save_results=False, save_frequency=5, log_fn=None):
         """
         Run gradient descent optimization for all time steps in the MDP.
 
@@ -95,6 +95,18 @@ class LinearMDP:
                         col_name = f"theta_{i}_{j}"
                         step_data[col_name] = theta_val
                 self.theta_history.append(step_data)
+
+            # Optional logging callback (e.g., to W&B)
+            if log_fn is not None:
+                try:
+                    payload = {"gd/step": int(t)}
+                    for i, theta_row in enumerate(self.param_model.theta):
+                        for j, theta_val in enumerate(theta_row):
+                            payload[f"theta/{i}/{j}"] = float(theta_val)
+
+                    log_fn(payload)
+                except Exception:
+                    pass
 
                 # Save and plot every 5 steps
                 if t % save_frequency == 0 and t != 0:
