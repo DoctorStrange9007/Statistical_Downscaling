@@ -3,10 +3,13 @@
 
 # Environments
 .env
+.myenv_py312
 .venv/
+myenv_py312/
 env/
 venv/
 ENV/
 __pycache__/
 # Output files
 output/
+wandb/

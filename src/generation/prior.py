@@ -232,7 +232,7 @@ class HR_prior:
         params = optax.apply_updates(params, updates)
         return val, params, opt_state
 
-    def train(self):
+    def train(self, log_fn=None):
         for k in tqdm(range(self.N_epochs)):
             self.rng, step_rng = jax.random.split(self.rng)
             # Permutes the data at each epoch, potentially change.
@@ -250,6 +250,16 @@ class HR_prior:
             mean_loss = jnp.mean(jnp.array(losses))
             if k % 1000 == 0:
                 print("Epoch %d \t, Mean Loss %f " % (k, mean_loss))
+            if log_fn is not None:
+                try:
+                    log_fn(
+                        {
+                            "prior/epoch": int(k),
+                            "prior/mean_loss": float(mean_loss),
+                        }
+                    )
+                except Exception:
+                    pass
 
     def trained_score(self, x, t):
         x_t = x / self.s(t)

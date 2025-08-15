@@ -82,7 +82,7 @@ class PDE_solver:
     def loss_fn(self, params, t_interior, x_interior, t_terminal, x_terminal):
         raise NotImplementedError("loss_fn must be implemented by subclasses")
 
-    def train(self):
+    def train(self, log_fn=None):
         for i in range(self.sampling_stages):
             t_interior, x_interior, t_terminal, x_terminal = self.sampler()
 
@@ -104,6 +104,19 @@ class PDE_solver:
             print(
                 f"Stage {i}: Loss = {float(tot):.6f}, L1 = {float(L1):.6f}, L3 = {float(L3):.6f}"
             )
+            if log_fn is not None:
+                try:
+                    log_fn(
+                        {
+                            "stage": i,
+                            "pde_solver/loss_total": float(tot),
+                            "pde_solver/loss_PDE": float(L1),
+                            "pde_solver/loss_terminal": float(L3),
+                        }
+                    )
+                except Exception:
+                    # Logging should not break training
+                    pass
 
     @partial(jax.jit, static_argnums=0)
     def grad_log_h(self, x: jax.Array, t: jax.Array) -> jax.Array:

@@ -34,7 +34,9 @@ class StatisticalDownscalingPDESolver(PDE_solver):
         # Beta schedule parameters
         self.beta_min = float(settings["general"]["beta_min"])
         self.beta_max = float(settings["general"]["beta_max"])
-        self.lambda_ = float(settings["pde_solver"]["lambda"])
+        self.lambda_ = jnp.float32(
+            settings["pde_solver"]["lambda"]
+        )  # to ensure that the lambda is a float32 to compare to lambda loop
 
     # Diffusion schedule and drifts for the OU-like SDE
     def beta(self, t: jax.Array) -> jax.Array:

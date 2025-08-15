@@ -25,7 +25,7 @@ pde_solver:
   y_target:
     - 0.0
     - 0.5
-  lambda: 1.0
+  lambda: 0.1
 pre_trained:
   data:
     batch_size: 50
