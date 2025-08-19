@@ -10,3 +10,4 @@ black
 autoflake
 scikit-learn
 torch
+wandb

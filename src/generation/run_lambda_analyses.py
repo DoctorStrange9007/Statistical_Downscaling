@@ -1,9 +1,13 @@
 import yaml
 import os
+import sys
 import argparse
 from datetime import datetime
 import jax
 import jax.numpy as jnp
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 from prior import HR_data, HR_prior
 from Statistical_Downscaling_PDE import StatisticalDownscalingPDESolver
 import utils_generation as utils

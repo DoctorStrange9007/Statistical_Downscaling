@@ -23,6 +23,10 @@ def plot_samples(samples, output_dir, name):
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
     ax.set_title("3D Scatter Plot of Samples")
+    try:
+        ax.set_box_aspect((1, 1, 1))
+    except Exception:
+        pass
     plt.savefig(os.path.join(output_dir, name))
 
 
@@ -339,6 +343,8 @@ def plot_hyperplane(samples, msd, settings, name, lambda_=None):
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
+    # Enforce equal scaling in 2D
+    ax.axis("equal")
     fig.savefig(fig_path, dpi=150)
     plt.close(fig)
     return fig_path
