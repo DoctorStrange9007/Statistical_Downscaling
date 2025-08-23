@@ -182,7 +182,7 @@ if __name__ == "__main__":
             hr_prior.g,
             hr_prior.f,
             run_sett["general"]["d"],
-            run_sett["general"]["n_samples"],
+            run_sett["general"]["n_samples_generate"],
             run_sett["general"]["T"],
             hr_prior.sigma2,
             hr_prior.s,
