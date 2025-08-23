@@ -57,10 +57,9 @@ class HR_data:
         self.beta_min = float(settings["general"]["beta_min"])
         self.beta_max = float(settings["general"]["beta_max"])
         self.T = float(settings["general"]["T"])
-        self.batch_size = int(settings["pre_trained"]["data"]["batch_size"])
         self.d = int(settings["general"]["d"])
         self.dt = float(settings["general"]["dt"])
-        self.n_samples = int(settings["general"]["n_samples"])
+        self.n_samples = int(settings["general"]["n_samples_train"])
         self.rng = rng_key if rng_key is not None else jax.random.PRNGKey(37)
 
     @staticmethod
@@ -120,7 +119,8 @@ class HR_data:
         Returns:
             Unnormalized density values `(B,)`.
         """
-        return jnp.exp(-jnp.abs(jnp.sum(jnp.square(x)) - 1.0))
+        return jnp.exp(-jnp.sum(jnp.square(x - 5.0)))
+        # return jnp.exp(-jnp.abs(jnp.sum(jnp.square(x)) - 1.0))
 
     def sigma_noise(self, t):
         """Noise magnitude schedule for the forward SDE.
@@ -131,7 +131,7 @@ class HR_data:
         Returns:
             Noise standard deviation at time `t`.
         """
-        return 0.0 * t + jnp.sqrt(2) * 0.001
+        return 0.0 * t + jnp.sqrt(2) * jnp.sqrt(2)
 
     def logp(self, x, t):
         """Log-density corresponding to `p(x, t)`.
@@ -185,10 +185,10 @@ class HR_prior:
         self.d = settings["general"]["d"]
         self.dt = settings["general"]["dt"]
         self.T = settings["general"]["T"]
+        self.batch_size = settings["general"]["batch_size"]
         self.beta_min = settings["general"]["beta_min"]
         self.beta_max = settings["general"]["beta_max"]
         self.N_epochs = settings["pre_trained"]["model"]["N_epochs"]
-        self.batch_size = settings["pre_trained"]["model"]["batch_size"]
         self.train_size = samples.shape[0]
         self.steps_per_epoch = self.train_size // self.batch_size
         self.denoiser = Denoiser()
@@ -198,7 +198,17 @@ class HR_prior:
             (self.batch_size, 1)
         )
         self.params = self.denoiser.init(self.rng, self.x, self.time)
-        self.optimizer = optax.adam(1e-4)
+        lr_schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=1e-4,
+            warmup_steps=0.05 * (self.N_epochs * self.steps_per_epoch),
+            decay_steps=0.95 * (self.N_epochs * self.steps_per_epoch),
+            end_value=1e-6,
+        )
+        self.optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adamw(learning_rate=lr_schedule, weight_decay=1e-4, eps=1e-6),
+        )
         self.opt_state = self.optimizer.init(self.params)
 
     # f,g not necessary here but just to indicate where the s(), sigma2 come from.
@@ -284,7 +294,7 @@ class HR_prior:
             Tuple `(loss, new_params, new_opt_state)`.
         """
         val, grads = jax.value_and_grad(self.loss_fn)(params, model, rng, batch)
-        updates, opt_state = self.optimizer.update(grads, opt_state)
+        updates, opt_state = self.optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return val, params, opt_state
 
@@ -335,6 +345,5 @@ class HR_prior:
         x_t = x / self.s(t)
         std = jnp.sqrt(self.sigma2(t))
 
-        return (self.s(t) * self.denoiser.apply(self.params, x_t, std) - x) / (
-            self.s2sigma2(t) + 1e-6
-        )
+        denom = jnp.clip(self.s2sigma2(t), 1e-4, None)
+        return (self.s(t) * self.denoiser.apply(self.params, x_t, std) - x) / denom

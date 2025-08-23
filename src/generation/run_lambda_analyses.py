@@ -19,7 +19,7 @@ except Exception:
 
 if __name__ == "__main__":
 
-    os.environ["WANDB"] = "1"
+    os.environ["WANDB"] = "0"
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", type=str, default="src/generation/settings_generation.yaml"
@@ -111,14 +111,18 @@ if __name__ == "__main__":
         hr_prior.g,
         hr_prior.f,
         run_sett["general"]["d"],
-        run_sett["general"]["n_samples"],
+        run_sett["general"]["n_samples_generate"],
         run_sett["general"]["T"],
         hr_prior.sigma2,
         hr_prior.s,
         conditional=False,
     )
 
-    # utils.plot_samples(samples_after, run_sett["output_dir"], "samples_after_gen_without_conditioning.png")
+    utils.plot_samples(
+        samples_after,
+        run_sett["output_dir"],
+        "samples_after_gen_without_conditioning.png",
+    )
     all_msd["gen_without_conditioning"] = utils.calculate_msd(samples_after, run_sett)
     if use_wandb:
         try:

@@ -6,6 +6,7 @@ from functools import partial
 from typing import Callable
 import pandas as pd
 import numpy as np
+from sklearn.neighbors import KernelDensity
 
 
 def plot_samples(samples, output_dir, name):
@@ -28,6 +29,103 @@ def plot_samples(samples, output_dir, name):
     except Exception:
         pass
     plt.savefig(os.path.join(output_dir, name))
+
+
+def plot_marginals_1_2_and_joint12(samples, output_dir, names, settings):
+    """Save smooth marginals (X1, X3) and joint (X1, X3) using KDE.
+
+    Args:
+        samples: Array of shape `(N, d>=3)`.
+        output_dir: Directory to save figures.
+        names: List/tuple of three file names: [x1.png, x3.png, joint.png].
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    arr = np.asarray(samples)
+    x_1 = arr[:, 0].astype(np.float64)
+    x_3 = arr[:, 2].astype(np.float64)
+    # Filter non-finite values before any KDE/hist operations
+    mask = np.isfinite(x_1) & np.isfinite(x_3)
+    x_1 = x_1[mask]
+    x_3 = x_3[mask]
+    if x_1.size == 0 or x_3.size == 0:
+        return
+
+    # 1) KDE marginal of X1 using scikit-learn KernelDensity
+    fig1, ax1 = plt.subplots(figsize=(5, 4))
+    grid1 = np.linspace(np.percentile(x_1, 0.5), np.percentile(x_1, 99.5), 800)
+    bw1 = max(1e-6, 1.06 * np.std(x_1) * (x_1.size ** (-1 / 5)))
+    kde1 = KernelDensity(kernel="gaussian", bandwidth=bw1).fit(x_1.reshape(-1, 1))
+    d1 = np.exp(kde1.score_samples(grid1.reshape(-1, 1)))
+    ax1.plot(grid1, d1, color="C0", label="KDE X1")
+    ax1.fill_between(grid1, d1, color="C0", alpha=0.2)
+    ax1.set_title("KDE of X1")
+    ax1.set_xlabel("X1")
+    ax1.axvline(
+        float(settings["pde_solver"]["y_target"][0]),
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label="y_1",
+    )
+    ax1.legend()
+    fig1.tight_layout()
+    fig1.savefig(os.path.join(output_dir, names[0]), dpi=200)
+    plt.close(fig1)
+
+    # 2) KDE marginal of X3 using scikit-learn KernelDensity
+    fig2, ax2 = plt.subplots(figsize=(5, 4))
+    grid3 = np.linspace(np.percentile(x_3, 0.5), np.percentile(x_3, 99.5), 800)
+    bw3 = max(1e-6, 1.06 * np.std(x_3) * (x_3.size ** (-1 / 5)))
+    kde3 = KernelDensity(kernel="gaussian", bandwidth=bw3).fit(x_3.reshape(-1, 1))
+    d3 = np.exp(kde3.score_samples(grid3.reshape(-1, 1)))
+    ax2.plot(grid3, d3, color="C1", label="KDE X3")
+    ax2.fill_between(grid3, d3, color="C1", alpha=0.2)
+    ax2.set_title("KDE of X3")
+    ax2.set_xlabel("X3")
+    ax2.axvline(
+        float(settings["pde_solver"]["y_target"][1]),
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label="y_2",
+    )
+    ax2.legend()
+    fig2.tight_layout()
+    fig2.savefig(os.path.join(output_dir, names[1]), dpi=200)
+    plt.close(fig2)
+
+    # 3) 3D joint density (X1, X3) using 2D KernelDensity with standardization
+    fig3 = plt.figure(figsize=(7, 5))
+    ax3 = fig3.add_subplot(111, projection="3d")
+    x1_min, x1_max = np.percentile(x_1, [1, 99])
+    x3_min, x3_max = np.percentile(x_3, [1, 99])
+    x1_grid = np.linspace(x1_min, x1_max, 120)
+    x3_grid = np.linspace(x3_min, x3_max, 120)
+    X, Y = np.meshgrid(x1_grid, x3_grid)
+
+    Zdata = np.stack([x_1, x_3], axis=1)
+    mean_vec = Zdata.mean(axis=0)
+    std_vec = Zdata.std(axis=0)
+    std_vec[std_vec == 0.0] = 1.0
+    Zstd = (Zdata - mean_vec) / std_vec
+    n = Zstd.shape[0]
+    bw2 = max(1e-6, 1.06 * (n ** (-1 / 6)))
+    kde2 = KernelDensity(kernel="gaussian", bandwidth=bw2).fit(Zstd)
+
+    grid_points = np.stack([X.ravel(), Y.ravel()], axis=1)
+    grid_points_std = (grid_points - mean_vec) / std_vec
+    d2_std = np.exp(kde2.score_samples(grid_points_std)).reshape(X.shape)
+    jac = float(std_vec[0] * std_vec[1])
+    Z = d2_std / jac
+
+    ax3.plot_surface(X, Y, Z, cmap="viridis", linewidth=0, antialiased=True)
+    ax3.set_title("Joint density of (X1, X3)")
+    ax3.set_xlabel("X1")
+    ax3.set_ylabel("X3")
+    ax3.set_zlabel("density")
+    fig3.tight_layout()
+    fig3.savefig(os.path.join(output_dir, names[2]), dpi=200)
+    plt.close(fig3)
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4, 5, 6, 7, 8, 9, 11))

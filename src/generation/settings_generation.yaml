@@ -4,11 +4,13 @@ output_dir: 'src/generation/output/'
 input_fn: 'Input_file.xlsx'
 general:
   d: 3
-  n_samples: 2000
-  dt: 0.001
+  n_samples_train: 38_400
+  batch_size: 512
+  dt: 0.0001
   T: 1
-  beta_min: 0.001
-  beta_max: 3 #19.9 -- likely have to increase this when working with uncentered data. 
+  n_samples_generate: 20_000
+  beta_min: 0.1
+  beta_max: 20 
 pde_solver:
   C:
     - [1, 0, 0]
@@ -19,23 +21,21 @@ pde_solver:
   nSim_terminal: 2000
   x_high: 1.5
   x_multiplier: 1.5
-  sampling_stages: 100 #100
+  sampling_stages: 100 
   steps_per_sample: 10
   learning_rate: 0.001
   y_target:
-    - 0.0
-    - 0.5
+    - 5.0
+    - 6.0
   lambda: 0.1
 pre_trained:
   data:
-    batch_size: 50
     dt: 0.001
   model:
     nodes_per_layer: 50
     num_layers: 3
     learning_rate: 0.001
-    N_epochs: 3_000 #3_000
-    batch_size: 20
+    N_epochs: 1_250
 
 
 

@@ -118,7 +118,7 @@ if __name__ == "__main__":
         hr_prior.g,
         hr_prior.f,
         run_sett["general"]["d"],
-        run_sett["general"]["n_samples"],
+        run_sett["general"]["n_samples_generate"],
         run_sett["general"]["T"],
         hr_prior.sigma2,
         hr_prior.s,
@@ -130,6 +130,26 @@ if __name__ == "__main__":
         "plots/samples_after",
         os.path.join(run_sett["output_dir"], "samples_after.png"),
     )
+
+    utils.plot_marginals_1_2_and_joint12(
+        samples_after,
+        run_sett["output_dir"],
+        ["marginal_1.png", "marginal_2.png", "joint_12.png"],
+        run_sett,
+    )
+    log_image(
+        "plots/marginal_1",
+        os.path.join(run_sett["output_dir"], "marginal_1.png"),
+    )
+    log_image(
+        "plots/marginal_2",
+        os.path.join(run_sett["output_dir"], "marginal_2.png"),
+    )
+    log_image(
+        "plots/joint_12",
+        os.path.join(run_sett["output_dir"], "joint_12.png"),
+    )
+
     if lambda_value is not None:
         log_fn({"lambda": lambda_value})
 
