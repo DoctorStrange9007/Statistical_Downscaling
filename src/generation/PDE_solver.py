@@ -27,12 +27,10 @@ class PDE_solver:
         self.T = float(settings["general"]["T"])
         self.x_low = float(settings["pde_solver"]["x_low"])
         self.x_high = float(settings["pde_solver"]["x_high"])
-        self.x_multiplier = float(settings["pde_solver"]["x_multiplier"])
         self.nSim_interior = int(settings["pde_solver"]["nSim_interior"])
         self.nSim_terminal = int(settings["pde_solver"]["nSim_terminal"])
         self.sampling_stages = int(settings["pde_solver"]["sampling_stages"])
         self.steps_per_sample = int(settings["pde_solver"]["steps_per_sample"])
-        self.learning_rate = float(settings["pde_solver"]["learning_rate"])
         self.d = int(settings["general"]["d"])
 
         # Network
@@ -53,6 +51,23 @@ class PDE_solver:
         self.params = self.net.init(self.rng, t0, x0)
 
         # Optimizer
+        # Support fixed or scheduled learning rates.
+        if settings["pde_solver"]["learning_rate"] == "sirignano":
+            boundaries = settings["pde_solver"]["boundaries"]
+            schedules = [
+                optax.constant_schedule(1e-4),
+                # optax.constant_schedule(5e-4),
+                optax.constant_schedule(1e-5),
+                # optax.constant_schedule(5e-6),
+                # optax.constant_schedule(1e-6),
+                # optax.constant_schedule(5e-7),
+                # optax.constant_schedule(1e-7),
+            ]
+            self.learning_rate = optax.join_schedules(
+                schedules=schedules, boundaries=boundaries
+            )
+        else:
+            self.learning_rate = float(settings["pde_solver"]["learning_rate"])
         self.optimizer = optax.adam(self.learning_rate)
         self.opt_state = self.optimizer.init(self.params)
 
@@ -63,7 +78,7 @@ class PDE_solver:
         Returns:
             Tuple `(t_interior, x_interior, t_terminal, x_terminal)` where
             interior samples are uniform in time over `(t_low, T]` and uniform
-            in space over `[x_low, x_high * x_multiplier]`, and terminal times
+            in space over `[x_low, x_high]`, and terminal times
             are fixed at `T`.
         """
         self.rng, k1, k2, k3 = jax.random.split(self.rng, 4)
@@ -74,14 +89,14 @@ class PDE_solver:
             k2,
             shape=(self.nSim_interior, self.d),
             minval=self.x_low,
-            maxval=self.x_high * self.x_multiplier,
+            maxval=self.x_high,
         )
         t_terminal = jnp.ones((self.nSim_terminal, 1), dtype=jnp.float32) * self.T
         x_terminal = jax.random.uniform(
             k3,
             shape=(self.nSim_terminal, self.d),
             minval=self.x_low,
-            maxval=self.x_high * self.x_multiplier,
+            maxval=self.x_high,
         )
         return t_interior, x_interior, t_terminal, x_terminal
 

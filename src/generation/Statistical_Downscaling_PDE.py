@@ -42,6 +42,21 @@ class StatisticalDownscalingPDESolver(PDE_solver):
             settings["pde_solver"]["lambda"]
         )  # to ensure that the lambda is a float32 to compare to lambda loop
 
+        # Conservative lower bound for lambda to avoid exp underflow in loss target
+        # We use the squared-norm exponent: exp(-||diff||^2 / lambda^2)
+        # Float32 underflows near exp(-87). Bound each constrained axis j by
+        bounds_x = np.asarray(
+            [float(abs(self.x_low)), float(abs(self.x_high))], dtype=np.float32
+        )
+        pairwise_diffs = np.abs(bounds_x[:, None] - self.y_target[None, :])
+        max_diff = np.max(pairwise_diffs)
+        diff_max_sq = float(np.sum([max_diff**2] * bounds_x.shape[0]))
+        # Safety margin: use 80 instead of 87 to be a bit conservative
+        lambda_min = float(np.sqrt(diff_max_sq / 80.0)) if diff_max_sq > 0 else 1e-6
+        assert (
+            lambda_min + 0.1 >= float(self.lambda_) >= lambda_min
+        ), f"pde_solver.lambda={float(self.lambda_):.4g} < minimum {lambda_min:.4g} to avoid exp underflow"
+
     # Diffusion schedule and drifts for the OU-like SDE
     def beta(self, t: jax.Array) -> jax.Array:
         """Linear diffusion schedule β(t)."""
@@ -106,7 +121,7 @@ class StatisticalDownscalingPDESolver(PDE_solver):
             x_terminal @ self.C.T - self.y_target
         )  # jnp.array([0.0111358, 0.56246203])
         target = (1 / self.lambda_) * jnp.exp(
-            (-jnp.linalg.norm(diff, axis=1, ord=2)) / (self.lambda_**2)
+            -jnp.sum(jnp.square(diff), axis=1) / (self.lambda_**2)
         ).reshape(-1, 1)
         L3 = jnp.mean(jnp.square(V_term - target))
 

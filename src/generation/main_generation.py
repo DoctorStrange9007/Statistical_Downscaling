@@ -89,9 +89,58 @@ if __name__ == "__main__":
     hr_prior = HR_prior(samples, run_sett, rng_key=key_prior)
     hr_prior.train(log_fn=log_fn if use_wandb else None)
 
+    all_msd = {}
+    diff_before = samples @ jnp.array(run_sett["pde_solver"]["C"]).T - jnp.array(
+        run_sett["pde_solver"]["y_target"]
+    )
+    all_msd["input_data"] = jnp.mean(jnp.square(diff_before).reshape(-1, 1))
+
+    # def analytical_score(x, t):
+    #    return -(x-hr_prior.s(t)*5.0)
+
+    x_1, samples_after = utils.sde_solver_backwards_cond(
+        key_sde,
+        hr_prior.trained_score,  # analytical_score,
+        None,
+        hr_prior.g,
+        hr_prior.f,
+        run_sett["general"]["d"],
+        run_sett["general"]["n_samples_generate"],
+        run_sett["general"]["T"],
+        hr_prior.sigma2,
+        hr_prior.s,
+        conditional=False,
+    )
+    all_msd["gen_without_conditioning"] = utils.calculate_msd(samples_after, run_sett)
+
+    utils.plot_samples(
+        samples_after,
+        run_sett["output_dir"],
+        "samples_after_gen_without_conditioning.png",
+    )
+    log_image(
+        "plots/samples_after_gen_without_conditioning",
+        os.path.join(
+            run_sett["output_dir"], "samples_after_gen_without_conditioning.png"
+        ),
+    )
+    utils.plot_hyperplane(
+        samples_after,
+        all_msd["gen_without_conditioning"],
+        run_sett,
+        "samples_2d_after_gen_without_conditioning.png",
+        None,
+    )
+    log_image(
+        "plots/samples_2d_after_gen_without_conditioning",
+        os.path.join(
+            run_sett["output_dir"], "samples_2d_after_gen_without_conditioning.png"
+        ),
+    )
+
     # Use subclassed statistical downscaling PDE
     pde_solver = StatisticalDownscalingPDESolver(
-        grad_log=hr_prior.trained_score,
+        grad_log=hr_prior.trained_score,  # analytical_score,
         samples=samples,
         settings=run_sett,
         rng_key=key_pde,
@@ -113,7 +162,7 @@ if __name__ == "__main__":
 
     x_1, samples_after = utils.sde_solver_backwards_cond(
         key_sde,
-        hr_prior.trained_score,
+        hr_prior.trained_score,  # analytical_score
         pde_solver.grad_log_h,
         hr_prior.g,
         hr_prior.f,
@@ -125,29 +174,45 @@ if __name__ == "__main__":
         conditional=True,
     )
 
-    utils.plot_samples(samples_after, run_sett["output_dir"], "samples_after.png")
+    all_msd["gen_with_conditioning"] = utils.calculate_msd(samples_after, run_sett)
+    utils.plot_samples(
+        samples_after, run_sett["output_dir"], "samples_after_gen_with_conditioning.png"
+    )
     log_image(
-        "plots/samples_after",
-        os.path.join(run_sett["output_dir"], "samples_after.png"),
+        "plots/samples_after_gen_with_conditioning",
+        os.path.join(run_sett["output_dir"], "samples_after_gen_with_conditioning.png"),
+    )
+    utils.plot_hyperplane(
+        samples_after,
+        all_msd["gen_with_conditioning"],
+        run_sett,
+        "samples_2d_after_gen_with_conditioning.png",
+        run_sett["pde_solver"]["lambda"],
+    )
+    log_image(
+        "plots/samples_2d_after_gen_with_conditioning",
+        os.path.join(
+            run_sett["output_dir"], "samples_2d_after_gen_with_conditioning.png"
+        ),
     )
 
     utils.plot_marginals_1_2_and_joint12(
         samples_after,
         run_sett["output_dir"],
-        ["marginal_1.png", "marginal_2.png", "joint_12.png"],
+        ["marginal_x1.png", "marginal_x2.png", "joint_x1x2.png"],
         run_sett,
     )
     log_image(
-        "plots/marginal_1",
-        os.path.join(run_sett["output_dir"], "marginal_1.png"),
+        "plots/marginal_x1",
+        os.path.join(run_sett["output_dir"], "marginal_x1.png"),
     )
     log_image(
-        "plots/marginal_2",
-        os.path.join(run_sett["output_dir"], "marginal_2.png"),
+        "plots/marginal_x2",
+        os.path.join(run_sett["output_dir"], "marginal_x2.png"),
     )
     log_image(
-        "plots/joint_12",
-        os.path.join(run_sett["output_dir"], "joint_12.png"),
+        "plots/joint_x1x2",
+        os.path.join(run_sett["output_dir"], "joint_x1x2.png"),
     )
 
     if lambda_value is not None:

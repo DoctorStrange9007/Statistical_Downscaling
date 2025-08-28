@@ -131,7 +131,8 @@ class HR_data:
         Returns:
             Noise standard deviation at time `t`.
         """
-        return 0.0 * t + jnp.sqrt(2) * jnp.sqrt(2)
+        return jnp.sqrt(2) * jnp.sqrt(2)
+        # return jnp.sqrt(2) * 0.001
 
     def logp(self, x, t):
         """Log-density corresponding to `p(x, t)`.

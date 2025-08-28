@@ -16,18 +16,18 @@ pde_solver:
     - [1, 0, 0]
     - [0, 0, 1]
   t_low: 1e-10
-  x_low: -1.5
   nSim_interior: 2000
-  nSim_terminal: 2000
-  x_high: 1.5
-  x_multiplier: 1.5
-  sampling_stages: 100 
-  steps_per_sample: 10
-  learning_rate: 0.001
+  nSim_terminal: 50000 #2000
+  x_low: 2.0 #change to fit data range
+  x_high: 8.0
+  sampling_stages: 1500 #1500 
+  steps_per_sample: 100 #10
+  learning_rate: sirignano
+  boundaries: [250] #[500, 1000, 2000, 3000, 4000, 4500]
   y_target:
-    - 5.0
+    - 4.0
     - 6.0
-  lambda: 0.1
+  lambda: 0.65
 pre_trained:
   data:
     dt: 0.001
