@@ -278,8 +278,8 @@ def main():
         integrator=solver_lib.EulerMaruyama(),
         tspan=dfn_lib.exponential_noise_decay(
             diffusion_scheme,
-            num_steps=256,
-            end_sigma=1e-2,  # 256 from grid_search section and end_sigma=sigma(clip_min) chosen
+            num_steps=256,  # table 6
+            end_sigma=1e-2,  # not defined in paper, end_sigma=sigma(clip_min) chosen
         ),
         scheme=diffusion_scheme,
         denoise_fn=denoise_fn,
