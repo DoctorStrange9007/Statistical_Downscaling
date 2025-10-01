@@ -15,9 +15,11 @@ import os
 import numpy as np
 from typing import Any, Dict, Iterable, Optional
 
+jax.config.update("jax_debug_nans", True)
+
 
 # Toggle W&B logging here. You can also disable via environment: WANDB_DISABLED=true
-USE_WANDB = False
+USE_WANDB = True
 
 
 class WandbWriter:
@@ -84,7 +86,6 @@ class WandbWriter:
 
 
 def main():
-    DATA_STD = 1.33
 
     # home = os.path.expanduser("~")   # -> /nfs/home/jesseh
     # work_dir = os.path.join(project_root, "temporary", "denoiser_KS")
@@ -92,32 +93,28 @@ def main():
     project_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..")
     )  # local machine
-    work_dir = os.path.join(project_root, "temporary", "denoiser_KS")
+    work_dir = os.path.join(
+        project_root, "temporary", "denoiser_KS"
+    )  # FOR A FRESH RUN empty temporary/
     os.makedirs(work_dir, exist_ok=True)
 
-    def get_raw_datasets(
-        file_name="data/KS_finite_volumes_vs_pseudo_spectral.hdf5", ds_x=4
-    ):
+    def get_raw_datasets(file_name="data/ks_trajectories_512.h5", ds_x=4):
 
         with h5py.File(file_name, "r+") as f1:
             # Trajectories with finite volumes.
-            u_lr = f1["u_fd"][()]
+            u_LFLR = f1["LFLR"][()]
+            # u_LFLR = f1["u_fd"][()]
+
             # Trajectories with pseudo spectral methods.
-            u_hr = f1["u_sp"][()]
-            # Time stamps for the trajectories.
+            u_HFHR = f1["HFHR"][()]
+            # u_HFHR = f1["u_sp"][()]
+
             t = f1["t"][()]
-            # Grid in which the trajectories are computed. 512 equispaced points with
-            # periodic boundary conditions.
             x = f1["x"][()]
 
-        t_ = t
-        x_ = jnp.concatenate([x, jnp.array(x[-1] + x[1] - x[0]).reshape((-1,))])[::ds_x]
+        u_HFLR = u_HFHR[:, :, ::ds_x]
 
-        u_lr_hf = u_hr[:, :, ::ds_x]
-        x_lr_hf = x_[::ds_x]
-        u_lr_lf = u_lr
-
-        return u_hr, u_lr_hf, u_lr_lf, x, x_, t, t_
+        return u_HFHR, u_LFLR, u_HFLR, x, t
 
     def get_ks_dataset(u_samples: jnp.ndarray, split: str, batch_size: int):
         """Returns a batched dataset from u_samples with the same interface as get_mnist_dataset.
@@ -154,10 +151,11 @@ def main():
 
         return ds
 
-    u_hr, u_lr_hf, u_lr_lf, x, x_, t, t_ = get_raw_datasets()
+    u_HFHR, u_LFLR, u_HFLR, x, t = get_raw_datasets()
 
-    u_hr_subsampled = u_hr[:, ::12, :]  # sample every 12.5
-    u_hr_samples = u_hr_subsampled.reshape(-1, 192, 1)
+    u_hfhr_samples = u_HFHR.reshape(-1, 192, 1)
+    # DATA_STD = 1.33 # temporary, draw this from the data directly
+    DATA_STD = u_hfhr_samples.std()
 
     # dataset = get_ks_dataset(u_hr, split="train[:75%]", batch_size=64)
 
@@ -198,7 +196,7 @@ def main():
         denoiser=denoiser_model,
         noise_sampling=dfn_lib.time_uniform_sampling(
             diffusion_scheme,
-            clip_min=10e-3,
+            clip_min=1e-3,
             uniform_grid=True,
         ),
         noise_weighting=dfn_lib.edm_weighting(data_std=DATA_STD),
@@ -212,10 +210,10 @@ def main():
             optax.adam(
                 learning_rate=optax.warmup_cosine_decay_schedule(
                     init_value=0.0,
-                    peak_value=10e-4,  # 10e-3, but with this data I get NaN values otherwise
+                    peak_value=1e-3,  # actually 1e-3, but with this data I get NaN values
                     warmup_steps=1_000,
                     decay_steps=990_000,
-                    end_value=10e-6,
+                    end_value=1e-6,
                 ),
             ),
         ),
@@ -239,7 +237,7 @@ def main():
 
     templates.run_train(
         train_dataloader=get_ks_dataset(
-            u_hr_samples, split="train[:75%]", batch_size=256  # 512
+            u_hfhr_samples, split="train[:75%]", batch_size=512  # 512
         ),
         trainer=trainer,
         workdir=work_dir,
@@ -247,7 +245,7 @@ def main():
         metric_writer=writer,
         metric_aggregation_steps=1000,
         eval_dataloader=get_ks_dataset(
-            u_hr_samples, split="train[75%:]", batch_size=256  # 512
+            u_hfhr_samples, split="train[75%:]", batch_size=512  # 512
         ),
         eval_every_steps=1000,
         num_batches_per_eval=2,
@@ -281,7 +279,7 @@ def main():
         tspan=dfn_lib.exponential_noise_decay(
             diffusion_scheme,
             num_steps=256,
-            end_sigma=10e-2,  # 256 from grid_search section and end_sigma=sigma(clip_min) chosen
+            end_sigma=1e-2,  # 256 from grid_search section and end_sigma=sigma(clip_min) chosen
         ),
         scheme=diffusion_scheme,
         denoise_fn=denoise_fn,
@@ -296,7 +294,7 @@ def main():
 
     # More informative visualizations
     samples_np = np.squeeze(np.array(samples))  # (N, 192)
-    real_np = np.squeeze(np.array(u_hr_samples))  # (M, 192)
+    real_np = np.squeeze(np.array(u_hfhr_samples))  # (M, 192)
 
     # 1) Overlay a few generated samples as line plots
     num_to_show = min(8, samples_np.shape[0])
