@@ -332,13 +332,13 @@ def main():
             apply_denoise_at_end=True,
             return_full_paths=False,  # Set to `True` if the full sampling paths are needed
         )
-        ##########################################################
 
         generate = jax.jit(sampler.generate, static_argnames=("num_samples",))
         samples = generate(
             rng=jax.random.PRNGKey(8888), num_samples=pde_solver.num_models
         )
 
+        ##########################################################
         a = 5
 
 
