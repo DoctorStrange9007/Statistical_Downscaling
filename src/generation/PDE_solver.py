@@ -40,6 +40,12 @@ class PDE_solver:
         n_layers = int(
             settings.get("pre_trained", {}).get("model", {}).get("num_layers", 3)
         )
+        # Number of models (targets). Backward compatible default 1.
+        self.num_models = int(
+            settings.get("pde_solver", {}).get(
+                "num_models", settings.get("general", {}).get("num_targets", 1)
+            )
+        )
         self.net = DGMNetJax(
             input_dim=self.d, layer_width=hidden, num_layers=n_layers, final_trans=None
         )
@@ -48,7 +54,14 @@ class PDE_solver:
         # Initialize parameters with dummy batch
         t0 = jnp.zeros((1, 1), dtype=jnp.float32)
         x0 = jnp.zeros((1, self.d), dtype=jnp.float32)
-        self.params = self.net.init(self.rng, t0, x0)
+        # Maintain separate parameter sets for each model using split RNG keys
+        keys = jax.random.split(self.rng, max(2, self.num_models + 1))
+        # Refresh base rng from first split for later use
+        self.rng = keys[0]
+        self.params_list = [
+            self.net.init(keys[k + 1], t0, x0) for k in range(self.num_models)
+        ]
+        # No single-model mirror; always use params_list
 
         # Optimizer
         # Support fixed or scheduled learning rates.
@@ -69,7 +82,9 @@ class PDE_solver:
         else:
             self.learning_rate = float(settings["pde_solver"]["learning_rate"])
         self.optimizer = optax.adam(self.learning_rate)
-        self.opt_state = self.optimizer.init(self.params)
+        # Optimizer state per model
+        self.opt_state_list = [self.optimizer.init(p) for p in self.params_list]
+        # No single-model mirror; always use opt_state_list
 
     # Sampling utilities (use JAX RNG)
     def sampler(self):
@@ -135,56 +150,131 @@ class PDE_solver:
         for i in range(self.sampling_stages):
             t_interior, x_interior, t_terminal, x_terminal = self.sampler()
 
+            # Generalized: always iterate over models (works for M=1 and M>1)
             for _ in range(self.steps_per_sample):
+                for k in range(self.num_models):
 
-                def total_loss(p):
-                    _, _, tot = self.loss_fn(
-                        p, t_interior, x_interior, t_terminal, x_terminal
+                    def total_loss_k(p, idx=k):
+                        y_arr = self.y_bar
+                        # Allow shapes: (M, out_dim), (M, out_dim, 1), or (out_dim,)
+                        y_t = y_arr[idx] if getattr(y_arr, "ndim", 0) >= 2 else y_arr
+                        return self.loss_fn(
+                            p,
+                            t_interior,
+                            x_interior,
+                            t_terminal,
+                            x_terminal,
+                            y_bar=y_t,
+                        )[2]
+
+                    _, grads = jax.value_and_grad(total_loss_k)(self.params_list[k])
+                    updates, self.opt_state_list[k] = self.optimizer.update(
+                        grads, self.opt_state_list[k]
                     )
-                    return tot
-
-                _, grads = jax.value_and_grad(total_loss)(self.params)
-                updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
-                self.params = optax.apply_updates(self.params, updates)
-
-            L1, L3, tot = self.loss_fn(
-                self.params, t_interior, x_interior, t_terminal, x_terminal
-            )
-            print(
-                f"Stage {i}: Loss = {float(tot):.6f}, L1 = {float(L1):.6f}, L3 = {float(L3):.6f}"
-            )
-            if log_fn is not None:
-                try:
-                    log_fn(
-                        {
-                            "stage": i,
-                            "pde_solver/loss_total": float(tot),
-                            "pde_solver/loss_PDE": float(L1),
-                            "pde_solver/loss_terminal": float(L3),
-                        }
+                    self.params_list[k] = optax.apply_updates(
+                        self.params_list[k], updates
                     )
-                except Exception:
-                    # Logging should not break training
-                    pass
+
+            # Compute and report per-model metrics
+            for k in range(self.num_models):
+                y_arr = self.y_bar
+                y_t = y_arr[k] if getattr(y_arr, "ndim", 0) >= 2 else y_arr
+                L1, L3, tot = self.loss_fn(
+                    self.params_list[k],
+                    t_interior,
+                    x_interior,
+                    t_terminal,
+                    x_terminal,
+                    y_bar=y_t,
+                )
+                print(
+                    f"Stage {i} [model {k}]: Loss = {float(tot):.6f}, L1 = {float(L1):.6f}, L3 = {float(L3):.6f}"
+                )
+                if log_fn is not None:
+                    try:
+                        log_fn(
+                            {
+                                "stage": i,
+                                "model": k,
+                                "pde_solver/loss_total": float(tot),
+                                "pde_solver/loss_PDE": float(L1),
+                                "pde_solver/loss_terminal": float(L3),
+                            }
+                        )
+                    except Exception:
+                        pass
+
+            # No backward-compat mirrors to model 0
 
     @partial(jax.jit, static_argnums=0)
+    def grad_log_h_params(
+        self, params: jax.Array, x: jax.Array, t: jax.Array
+    ) -> jax.Array:
+        """Compute per-sample gradients ∂/∂x log h(t, x) for given params."""
+        x_flat = x.reshape(1, -1)
+        t = t.reshape(1, 1)
+
+        def loss(xs):
+            h = self.net.apply(params, t, xs).squeeze(-1)
+            return jnp.sum(jnp.log(jnp.maximum(h, 1e-6)))
+
+        return jax.grad(loss)(x_flat)
+
+    def grad_log_h_model(self, model_idx: int, x: jax.Array, t: jax.Array) -> jax.Array:
+        """Convenience wrapper to compute grad_log_h for model `model_idx`."""
+        return self.grad_log_h_params(self.params_list[model_idx], x, t)
+
+    def grad_log_h_all(self, x: jax.Array, t: jax.Array):
+        """Compute grad_log_h for all models, returned as a Python list of arrays."""
+        return [self.grad_log_h_params(p, x, t) for p in self.params_list]
+
+    # Backward-compatible single-model API
+    @partial(jax.jit, static_argnums=0)
     def grad_log_h(self, x: jax.Array, t: jax.Array) -> jax.Array:
-        """Compute gradients of log h(x, t) induced by the current network.
+        """Backward-compatible wrapper that uses model 0 parameters."""
+        return self.grad_log_h_params(self.params_list[0], x, t)
 
-        Args:
-            x: Spatial inputs of shape `(B, d)`.
-            t: Time inputs of shape `(B, 1)`.
+    # JAX-friendly per-model selection for num_samples == num_models
+    def _grad_log_h_params_switch(
+        self, idx: jax.Array, x: jax.Array, t: jax.Array
+    ) -> jax.Array:
+        """Select params for model `idx` using a JAX switch and compute grad_log_h.
 
-        Returns:
-            Tensor of shape `(B, d)` with gradients w.r.t. x.
+        This avoids traced indexing into Python lists inside jit/vmap.
         """
 
-        def log_h_single(ts: jax.Array, xs: jax.Array) -> jax.Array:
-            ts_b = ts.reshape(1, 1)
-            xs_b = xs.reshape(1, -1)
-            h = self.net.apply(self.params, ts_b, xs_b).squeeze()
-            return jnp.log(jnp.maximum(h, 1e-6))
+        def make_case(k):
+            return lambda x_=x, t_=t, k_=k: self.grad_log_h_params(
+                self.params_list[k_], x_, t_
+            )
 
-        grad_fn = jax.grad(lambda xs, ts: log_h_single(ts, xs))
-        grads = jax.vmap(lambda ts, xs: grad_fn(xs, ts.squeeze()))(t, x)
+        return jax.lax.switch(idx, tuple(make_case(k) for k in range(self.num_models)))
+
+    @partial(jax.jit, static_argnums=0)
+    def grad_log_h_batched_one_per_model(self, x: jax.Array, t: jax.Array) -> jax.Array:
+        """Compute grad_log_h for a batch where sample i uses model i.
+
+        Args:
+            x: Array with shape `(M, d)` or `(M, d, 1)` where `M == self.num_models`.
+            t: Scalar `()` or array with shape `(M,)` or `(M, 1)`.
+
+        Returns:
+            Array with shape `(M, d)` containing per-sample gradients.
+        """
+        # Normalize shapes
+        M = x.shape[0]
+        x_flat = x.reshape(M, -1)
+        if t.ndim == 0:
+            t = jnp.ones((M, 1), dtype=x_flat.dtype) * t
+        elif t.ndim == 1:
+            t = t.reshape(M, 1)
+        idxs = jnp.arange(M, dtype=jnp.int32)
+
+        def per_sample(i, xs, ts):
+            return self._grad_log_h_params_switch(i, xs, ts)
+
+        grads = jax.vmap(per_sample)(idxs, x_flat, t)
+        # grads comes back as (M, 1, d_flat); squeeze the singleton batch axis
+        if grads.ndim == 3 and grads.shape[1] == 1:
+            grads = jnp.squeeze(grads, axis=1)
         return grads
