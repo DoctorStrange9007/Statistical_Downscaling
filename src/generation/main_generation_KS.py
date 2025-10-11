@@ -21,6 +21,11 @@ from src.generation.Statistical_Downscaling_PDE_KS import (
 from src.generation.swirl_dynamics_new_guidance.guidance import LinearConstraint
 from src.generation.swirl_dynamics_new_sampler.samplers import NewDriftSdeSampler
 
+from src.generation.utils_metrics import calculate_constraint_rmse
+from src.generation.utils_metrics import calculate_kld
+from src.generation.utils_metrics import calculate_sample_variability
+from src.generation.utils_metrics import calculate_melr
+
 import yaml
 import argparse
 
@@ -291,7 +296,10 @@ def main():
     elif option == 3:
         ##########################################################
         #### GENERATES CONDITIONAL SAMPLES as per our paper ####
-        num_models = run_sett["pde_solver"]["num_models"]
+        C_prime = jnp.array(
+            [[1 if j == 4 * i else 0 for j in range(192)] for i in range(48)]
+        )
+        num_models = run_sett["pde_solver"]["num_models"]  # aka num_conditions 512
         pde_solver = KSStatisticalDownscalingPDESolver(
             samples=u_hfhr_samples,
             y_bar=u_lflr_samples[
@@ -333,12 +341,30 @@ def main():
             return_full_paths=False,  # Set to `True` if the full sampling paths are needed
         )
 
+        base = jax.random.PRNGKey(8888)
+        samples_per_condition = 10  # 128
+        keys = jax.random.split(base, samples_per_condition)
+
         generate = jax.jit(sampler.generate, static_argnames=("num_samples",))
-        samples = generate(
-            rng=jax.random.PRNGKey(8888), num_samples=pde_solver.num_models
+        batched_generate = jax.jit(
+            jax.vmap(lambda k: generate(rng=k, num_samples=pde_solver.num_models))
         )
+        samples = batched_generate(keys)
 
         ##########################################################
+        #### CALCULATES METRICS ####
+        constraint_rmse = calculate_constraint_rmse(
+            samples, u_lflr_samples[0:num_models], C_prime
+        )
+        kld = calculate_kld(samples, u_hfhr_samples, epsilon=1e-10)
+        sample_variability = calculate_sample_variability(samples)
+        melr_weighted = calculate_melr(
+            samples, u_hfhr_samples, sample_shape=(192,), weighted=True, epsilon=1e-10
+        )
+        melr_unweighted = calculate_melr(
+            samples, u_hfhr_samples, sample_shape=(192,), weighted=False, epsilon=1e-10
+        )
+
         a = 5
 
 
