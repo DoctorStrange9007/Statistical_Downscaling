@@ -3,6 +3,9 @@ import jax.numpy as jnp
 import optax
 from functools import partial
 from src.generation.DGMJax import DGMNetJax
+import orbax.checkpoint as ocp
+import os
+import shutil
 
 
 class PDE_solver:
@@ -34,18 +37,9 @@ class PDE_solver:
         self.d = int(settings["general"]["d"])
 
         # Network
-        hidden = int(
-            settings.get("pre_trained", {}).get("model", {}).get("nodes_per_layer", 128)
-        )
-        n_layers = int(
-            settings.get("pre_trained", {}).get("model", {}).get("num_layers", 3)
-        )
-        # Number of models (targets). Backward compatible default 1.
-        self.num_models = int(
-            settings.get("pde_solver", {}).get(
-                "num_models", settings.get("general", {}).get("num_targets", 1)
-            )
-        )
+        hidden = int(settings["pre_trained"]["model"]["nodes_per_layer"])
+        n_layers = int(settings["pre_trained"]["model"]["num_layers"])
+        self.num_models = int(settings["pde_solver"]["num_models"])
         self.net = DGMNetJax(
             input_dim=self.d, layer_width=hidden, num_layers=n_layers, final_trans=None
         )
@@ -278,3 +272,48 @@ class PDE_solver:
         if grads.ndim == 3 and grads.shape[1] == 1:
             grads = jnp.squeeze(grads, axis=1)
         return grads
+
+    def save_params(self, ckpt_dir: str):
+        """Save current params_list and opt_state_list to a checkpoint directory.
+
+        Args:
+            ckpt_dir: Directory path to write the checkpoint. This directory will be
+                created if it doesn't exist, and its contents will be overwritten.
+        """
+        # Ensure the target directory exists and is empty for a clean save.
+        if os.path.exists(ckpt_dir):
+            shutil.rmtree(ckpt_dir)
+        checkpointer = ocp.PyTreeCheckpointer()
+        # Create a payload containing both the parameters and the optimizer state.
+        payload = {
+            "params_list": self.params_list,
+            "opt_state_list": self.opt_state_list,
+        }
+        # Save the complete state directly into the specified directory.
+        checkpointer.save(ckpt_dir, payload)
+        print(f"Solver state saved successfully to: {ckpt_dir}")
+
+    def load_params(self, ckpt_dir: str) -> bool:
+        """Load params_list and opt_state_list from a checkpoint directory.
+
+        Returns True if loaded successfully, else False.
+        """
+        try:
+            checkpointer = ocp.PyTreeCheckpointer()
+            # Restore directly from the specified directory.
+            restored = checkpointer.restore(ckpt_dir)
+
+            if restored and "params_list" in restored and "opt_state_list" in restored:
+                # Load both the parameters and the optimizer state.
+                self.params_list = restored["params_list"]
+                self.opt_state_list = restored["opt_state_list"]
+                print(f"Solver state loaded successfully from: {ckpt_dir}")
+                return True
+            else:
+                print(f"Checkpoint in {ckpt_dir} is missing required data.")
+                return False
+
+        except Exception as e:
+            # Provide more information if loading fails.
+            print(f"Failed to load solver state from {ckpt_dir}. Error: {e}")
+            return False
