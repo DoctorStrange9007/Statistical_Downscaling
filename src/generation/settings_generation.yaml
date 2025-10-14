@@ -11,7 +11,7 @@ general:
   eval_every_steps: 100 #10 for runthrough
   metric_aggregation_steps: 100 #10 for runthrough
   save_interval_steps: 100 #10 for runthrough
-  num_batches_per_eval: 10 #1 for runthrough ##
+  num_batches_per_eval: 10 #1 for runthrough #not defined specifically in the paper
   max_to_keep: 1
   T: 1
   beta_min: 0.1
@@ -38,7 +38,7 @@ optimizer:
   clip_norm: 1.0
 exp_tspan:
   num_steps: 256
-  end_sigma: 1e-2 ##
+  end_sigma: 1e-2 #not defined specifically in the paper
 pde_solver:
   t_low: 1e-10
   nSim_interior: 2000
