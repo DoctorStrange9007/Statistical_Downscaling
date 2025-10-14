@@ -186,13 +186,12 @@ class PDE_solver:
                 )
                 if log_fn is not None:
                     try:
+                        # Log per-model series under distinct metric names
                         log_fn(
                             {
-                                "stage": i,
-                                "model": k,
-                                "pde_solver/loss_total": float(tot),
-                                "pde_solver/loss_PDE": float(L1),
-                                "pde_solver/loss_terminal": float(L3),
+                                f"pde_solver/model_{k}/loss_total": float(tot),
+                                f"pde_solver/model_{k}/loss_PDE": float(L1),
+                                f"pde_solver/model_{k}/loss_terminal": float(L3),
                             }
                         )
                     except Exception:

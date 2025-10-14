@@ -2,6 +2,7 @@ output_dir: 'src/generation/output/'
 option: 'conditional'
 rng_key: 888
 general:
+  data_file_name: 'data/ks_trajectories_512.h5'
   d: 192 #3 for easy example 
   d_prime: 48
   batch_size: 32 #512

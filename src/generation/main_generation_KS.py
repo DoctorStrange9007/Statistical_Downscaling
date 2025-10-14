@@ -4,17 +4,13 @@ import os
 import sys
 import jax
 
-try:
-    import wandb  # type: ignore
-except Exception:  # wandb is optional
-    wandb = None  # type: ignore
 import jax.numpy as jnp
 from clu import metric_writers
-from src.generation.wandb import WandbWriter
 import yaml
 import argparse
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+from src.generation.wandb_adapter import WandbWriter
 from src.generation.Statistical_Downscaling_PDE_KS import (
     KSStatisticalDownscalingPDESolver,
 )
@@ -48,16 +44,8 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = False
-
-
-def log_fn(payload: dict):
-    """Safe metric logger that no-ops if logging is disabled or fails."""
-    if USE_WANDB and (wandb is not None):
-        try:
-            wandb.log(payload)
-        except Exception:
-            pass
+USE_WANDB = True
+mode = "train"
 
 
 def main():
@@ -66,7 +54,9 @@ def main():
     work_dir = os.path.join(project_root, "temporary", "main_generation_KS")
     os.makedirs(work_dir, exist_ok=True)
 
-    u_HFHR, u_LFLR, u_HFLR, x, t = get_raw_datasets()
+    u_HFHR, u_LFLR, u_HFLR, x, t = get_raw_datasets(
+        file_name=run_sett["general"]["data_file_name"]
+    )
 
     u_hfhr_samples = u_HFHR.reshape(-1, int(run_sett["general"]["d"]), 1)
     u_lflr_samples = u_LFLR.reshape(-1, int(run_sett["general"]["d_prime"]), 1)
@@ -75,12 +65,16 @@ def main():
     denoiser_model = create_denoiser_model()
     diffusion_scheme = create_diffusion_scheme(DATA_STD)
 
-    mode = "sample"
-
-    use_wandb = bool(USE_WANDB and not os.environ.get("WANDB_DISABLED"))
+    # Use env or defaults for project/entity; allow user override
+    os.environ.setdefault("WANDB_PROJECT", "statistical-downscaling-main-training")
+    os.environ.setdefault("WANDB_ENTITY", "jesse-hoekstra-university-of-oxford")
+    use_wandb = bool(USE_WANDB)
     base_writer = metric_writers.create_default_writer(work_dir, asynchronous=False)
+    writer = base_writer
     if use_wandb:
-        project = os.environ.get("WANDB_PROJECT", "statistical-downscaling-denoiser-KS")
+        project = os.environ.get(
+            "WANDB_PROJECT", "statistical-downscaling-main-training"
+        )
         run_name = os.environ.get("WANDB_NAME", os.path.basename(work_dir))
         entity = os.environ.get("WANDB_ENTITY")  # optional
         writer_name = run_name if mode == "train" else f"{run_name}-sample"
@@ -90,9 +84,15 @@ def main():
             name=writer_name,
             entity=entity,
             config={"work_dir": work_dir, "mode": mode, **run_sett},
+            active=True,
         )
-    else:
-        writer = base_writer
+
+    def log_fn(payload: dict):
+        try:
+            writer.write_scalars(scalars=payload)
+        except Exception:
+            pass
+
     if mode == "train":
         print("Running in training mode…")
         model = build_model(denoiser_model, diffusion_scheme, DATA_STD)
@@ -138,11 +138,7 @@ def main():
             )
 
             pde_solver.train(
-                log_fn=(
-                    (lambda payload: log_fn({**payload, "lambda": lambda_value}))
-                    if use_wandb
-                    else None
-                )
+                log_fn=(lambda payload: log_fn({**payload, "lambda": lambda_value}))
             )
             pde_params_dir = os.path.join(work_dir, "pde_params")
             pde_solver.save_params(pde_params_dir)
@@ -218,23 +214,12 @@ def main():
                 weighted=False,
                 epsilon=1e-10,
             )
-            print("constraint_rmse:", float(constraint_rmse))
-            print("kld:", float(kld))
-            print("sample_variability:", float(sample_variability))
-            print("melr_weighted:", float(melr_weighted))
-            print("melr_unweighted:", float(melr_unweighted))
-            try:
-                writer.write_scalars(
-                    scalars={
-                        "metrics/constraint_rmse": float(constraint_rmse),
-                        "metrics/kld": float(kld),
-                        "metrics/sample_variability": float(sample_variability),
-                        "metrics/melr_weighted": float(melr_weighted),
-                        "metrics/melr_unweighted": float(melr_unweighted),
-                    }
-                )
-            except Exception:
-                pass
+
+            writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
+            writer.write_scalar("metrics/kld", float(kld))
+            writer.write_scalar("metrics/sample_variability", float(sample_variability))
+            writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
+            writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
 
     # Flush/close the writer once
     try:

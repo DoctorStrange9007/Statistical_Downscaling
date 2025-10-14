@@ -9,7 +9,7 @@ import os
 
 try:
     import wandb  # type: ignore
-except Exception:  # wandb is optional
+except Exception:
     wandb = None  # type: ignore
 
 
@@ -21,7 +21,14 @@ class WandbWriter:
     """
 
     def __init__(
-        self, base_writer, *, project: str, name: str, entity: str = None, config=None
+        self,
+        base_writer,
+        *,
+        project: str,
+        name: str,
+        entity: str = None,
+        config=None,
+        active: bool = True,
     ):
         """Initialize the adapter.
 
@@ -34,7 +41,9 @@ class WandbWriter:
         """
         self.base_writer = base_writer
         self._step = 0
-        self._active = bool(wandb is not None and not os.environ.get("WANDB_DISABLED"))
+        self._active = bool(
+            active and (wandb is not None) and not os.environ.get("WANDB_DISABLED")
+        )
         self._run = None
         if self._active:
             try:
@@ -55,11 +64,8 @@ class WandbWriter:
     def set_step(self, step: int):
         """Set the current global step for both base writer and W&B."""
         self._step = int(step)
-        try:
-            if hasattr(self.base_writer, "set_step"):
-                self.base_writer.set_step(step)
-        except Exception:
-            pass
+        if hasattr(self.base_writer, "set_step"):
+            self.base_writer.set_step(step)
 
     def write_scalars(self, *args, **kwargs):
         """Write a dictionary of scalar metrics, and mirror to W&B.
@@ -79,21 +85,18 @@ class WandbWriter:
         if step is None:
             step = self._step
 
-        try:
-            self.base_writer.write_scalars(step=step, scalars=scalars)
-        except TypeError:
-            try:
-                self.base_writer.write_scalars(scalars, step)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        self.base_writer.write_scalars(step=step, scalars=scalars)
 
-        if self._active and scalars:
-            try:
-                wandb.log(dict(scalars), step=int(step) if step is not None else None)
-            except Exception:
-                pass
+        if self._active and scalars and (wandb is not None):
+            wandb.log(dict(scalars))
+
+    def write_scalar(self, name: str, value):
+        """Convenience: write a single scalar by name.
+
+        This avoids step management and mirrors directly to W&B when active.
+        """
+        if self._active and (wandb is not None):
+            wandb.log({name: value})
 
     def write_hparams(self, hparams):
         """Write hyperparameters to the base writer and W&B config."""
@@ -102,7 +105,7 @@ class WandbWriter:
                 self.base_writer.write_hparams(hparams)
         except Exception:
             pass
-        if self._active and hparams:
+        if self._active and hparams and (wandb is not None):
             try:
                 wandb.config.update(dict(hparams), allow_val_change=True)
             except Exception:
@@ -119,7 +122,7 @@ class WandbWriter:
         except Exception:
             pass
         images = kwargs.get("images")
-        if self._active and images:
+        if self._active and images and (wandb is not None):
             try:
                 wandb.log(
                     {k: wandb.Image(v) for k, v in images.items()}, step=self._step
@@ -129,21 +132,12 @@ class WandbWriter:
 
     def flush(self):
         """Flush the base writer buffers if supported."""
-        try:
-            if hasattr(self.base_writer, "flush"):
-                self.base_writer.flush()
-        except Exception:
-            pass
+        if hasattr(self.base_writer, "flush"):
+            self.base_writer.flush()
 
     def close(self):
         """Close the base writer and finish the W&B run if active."""
-        try:
-            if hasattr(self.base_writer, "close"):
-                self.base_writer.close()
-        except Exception:
-            pass
-        if self._active:
-            try:
-                wandb.finish()
-            except Exception:
-                pass
+        if hasattr(self.base_writer, "close"):
+            self.base_writer.close()
+        if self._active and (wandb is not None):
+            wandb.finish()

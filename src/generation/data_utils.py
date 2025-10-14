@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import tensorflow as tf
 
 
-def get_raw_datasets(file_name="data/ks_trajectories_512.h5", ds_x=4):
+def get_raw_datasets(file_name, ds_x=4):
     """Load KS trajectory datasets from an HDF5 file and derive a downsampled field.
 
     This reads the low-fidelity, low-resolution (`LFLR`), high-fidelity, high-resolution (`HFHR`),
