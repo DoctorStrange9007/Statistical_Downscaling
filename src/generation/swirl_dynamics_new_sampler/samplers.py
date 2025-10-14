@@ -1,17 +1,25 @@
-from swirl_dynamics.lib.diffusion import diffusion
-import swirl_dynamics.lib.diffusion as dfn_lib
-from swirl_dynamics.lib.solvers import sde
-
-from collections.abc import Mapping
-from typing import Any, Callable, TypeAlias
-
 import jax
 import jax.numpy as jnp
 import flax
+import argparse
+import yaml
+from swirl_dynamics.lib.diffusion import diffusion
+import swirl_dynamics.lib.diffusion as dfn_lib
+from swirl_dynamics.lib.solvers import sde
+from collections.abc import Mapping
+from typing import Any, Callable, TypeAlias
 
 Array: TypeAlias = jax.Array
 ArrayMapping: TypeAlias = Mapping[str, Array]
 Params: TypeAlias = Mapping[str, Any]
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--config", type=str, default="src/generation/settings_generation.yaml"
+)
+args = parser.parse_args()
+with open(args.config, "r") as f:
+    run_sett = yaml.safe_load(f)
 
 
 def dlog_dt(f: diffusion.ScheduleFn) -> diffusion.ScheduleFn:
@@ -34,7 +42,7 @@ class NewDriftSdeSampler(dfn_lib.SdeSampler):
     guidance_fn: Callable[[Array, Array], Array] | None = flax.struct.field(
         default=None, pytree_node=False
     )
-    T: float = 1.0
+    T: float = float(run_sett["general"]["T"])
 
     def __post_init__(self):
         if self.guidance_fn is None:
@@ -46,7 +54,7 @@ class NewDriftSdeSampler(dfn_lib.SdeSampler):
 
         In score function:
 
-        dx = [ṡ(t)/s(t) x - 2 s(t)²σ̇(t)σ(t) ∇pₜ(x)] dt + s(t) √[2σ̇(t)σ(t)] dωₜ,
+        dx = [ṡ(t)/s(t) x - 2 s(t)²σ̇(t)σ(t) ∇pₜ(x)- 2 s(t)²σ̇(t)σ(t) ∇h_T-t(x)] dt + s(t) √[2σ̇(t)σ(t)] dωₜ,
 
         obtained by substituting eq. 28, 34 of Karras et al.
         (https://arxiv.org/abs/2206.00364) into the reverse SDE formula - eq. 6 in
@@ -54,7 +62,7 @@ class NewDriftSdeSampler(dfn_lib.SdeSampler):
         rewritten in terms of the denoise function (plugging in eq. 74 of
         Karras et al.) as:
 
-        dx = [2 σ̇(t)/σ(t) + ṡ(t)/s(t)] x - [2 s(t)σ̇(t)/σ(t)] D(x/s(t), σ(t)) + s(t)**2 * 2σ̇(t)σ(t) * ∇h_(T-t)(x) dt
+        dx = [2 σ̇(t)/σ(t) + ṡ(t)/s(t)] x - [2 s(t)σ̇(t)/σ(t)] D(x/s(t), σ(t)) + s(t)**2 * 2σ̇(t)σ(t) * ∇h_T-t(x) dt
             + s(t) √[2σ̇(t)σ(t)] dωₜ
 
         where s(t), σ(t) are the scale and noise schedule of the diffusion scheme

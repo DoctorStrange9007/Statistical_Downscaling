@@ -1,3 +1,10 @@
+"""Base PDE solver utilities built on JAX.
+
+Defines `PDE_solver`, a base class providing network setup, sampling utilities,
+training loop scaffolding, and gradient helpers. Concrete solvers should
+subclass it and implement `loss_fn`.
+"""
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -12,18 +19,17 @@ class PDE_solver:
     """Base class for PDE solvers.
 
     Provides common initialization, sampling, forward pass, training loop,
-    and utility gradients. Subclasses must implement loss_fn.
+    and gradient utilities. Subclasses must implement `loss_fn`.
     """
 
     def __init__(self, settings: dict, rng_key: jax.Array | None = None):
-        """Initialize the base PDE solver with common configuration.
+        """Initialize solver configuration, model parameters, and optimizer.
 
         Args:
-            settings: Hierarchical settings containing keys under `general` and
-                `pde_solver` specifying time horizon, sampling sizes, optimizer
-                hyperparameters, spatial bounds, and network size.
-            rng_key: Optional JAX PRNG key for deterministic initialization and
-                sampling. If omitted, a default key is created.
+            settings: Dict with sections `general`, `pde_solver`, and `DGM`
+                specifying domain bounds, sampling sizes, optimizer
+                hyperparameters, and network architecture.
+            rng_key: Optional PRNG key for deterministic init and sampling.
         """
         # Common settings
         self.t_low = float(settings["pde_solver"]["t_low"])
@@ -48,17 +54,13 @@ class PDE_solver:
         # Initialize parameters with dummy batch
         t0 = jnp.zeros((1, 1), dtype=jnp.float32)
         x0 = jnp.zeros((1, self.d), dtype=jnp.float32)
-        # Maintain separate parameter sets for each model using split RNG keys
         keys = jax.random.split(self.rng, max(2, self.num_models + 1))
-        # Refresh base rng from first split for later use
         self.rng = keys[0]
         self.params_list = [
             self.net.init(keys[k + 1], t0, x0) for k in range(self.num_models)
         ]
-        # No single-model mirror; always use params_list
 
         # Optimizer
-        # Support fixed or scheduled learning rates.
         if settings["pde_solver"]["learning_rate"] == "sirignano":
             boundaries = settings["pde_solver"]["boundaries"]
             schedules = [
@@ -78,7 +80,6 @@ class PDE_solver:
         self.optimizer = optax.adam(self.learning_rate)
         # Optimizer state per model
         self.opt_state_list = [self.optimizer.init(p) for p in self.params_list]
-        # No single-model mirror; always use opt_state_list
 
     # Sampling utilities (use JAX RNG)
     def sampler(self):
@@ -87,8 +88,7 @@ class PDE_solver:
         Returns:
             Tuple `(t_interior, x_interior, t_terminal, x_terminal)` where
             interior samples are uniform in time over `(t_low, T]` and uniform
-            in space over `[x_low, x_high]`, and terminal times
-            are fixed at `T`.
+            in space over `[x_low, x_high]`, and terminal times are fixed at `T`.
         """
         self.rng, k1, k2, k3 = jax.random.split(self.rng, 4)
         t_interior = jax.random.uniform(
@@ -137,14 +137,15 @@ class PDE_solver:
     def train(self, log_fn=None):
         """Train the network using SGD/Adam over sampled batches.
 
+        Iterates for `sampling_stages`, drawing fresh samples each stage and
+        performing `steps_per_sample` optimization steps per model.
+
         Args:
-            log_fn: Optional callable that accepts a dictionary of scalar
-                metrics logged once per sampling stage.
+            log_fn: Optional callable receiving a dict of scalar metrics once
+                per sampling stage.
         """
         for i in range(self.sampling_stages):
             t_interior, x_interior, t_terminal, x_terminal = self.sampler()
-
-            # Generalized: always iterate over models (works for M=1 and M>1)
             for _ in range(self.steps_per_sample):
                 for k in range(self.num_models):
 
@@ -169,7 +170,6 @@ class PDE_solver:
                         self.params_list[k], updates
                     )
 
-            # Compute and report per-model metrics
             for k in range(self.num_models):
                 y_arr = self.y_bar
                 y_t = y_arr[k] if getattr(y_arr, "ndim", 0) >= 2 else y_arr
@@ -198,13 +198,14 @@ class PDE_solver:
                     except Exception:
                         pass
 
-            # No backward-compat mirrors to model 0
-
     @partial(jax.jit, static_argnums=0)
     def grad_log_h_params(
         self, params: jax.Array, x: jax.Array, t: jax.Array
     ) -> jax.Array:
-        """Compute per-sample gradients ∂/∂x log h(t, x) for given params."""
+        """Compute per-sample gradients ∂/∂x log h(t, x) for given params.
+
+        Returns an array matching the flattened spatial dimension of `x`.
+        """
         x_flat = x.reshape(1, -1)
         t = t.reshape(1, 1)
 
@@ -215,11 +216,11 @@ class PDE_solver:
         return jax.grad(loss)(x_flat)
 
     def grad_log_h_model(self, model_idx: int, x: jax.Array, t: jax.Array) -> jax.Array:
-        """Convenience wrapper to compute grad_log_h for model `model_idx`."""
+        """Convenience wrapper to compute `grad_log_h` for model `model_idx`."""
         return self.grad_log_h_params(self.params_list[model_idx], x, t)
 
     def grad_log_h_all(self, x: jax.Array, t: jax.Array):
-        """Compute grad_log_h for all models, returned as a Python list of arrays."""
+        """Compute `grad_log_h` for all models and return a Python list of arrays."""
         return [self.grad_log_h_params(p, x, t) for p in self.params_list]
 
     # Backward-compatible single-model API
@@ -232,9 +233,9 @@ class PDE_solver:
     def _grad_log_h_params_switch(
         self, idx: jax.Array, x: jax.Array, t: jax.Array
     ) -> jax.Array:
-        """Select params for model `idx` using a JAX switch and compute grad_log_h.
+        """Select params for model `idx` using a JAX switch and compute `grad_log_h`.
 
-        This avoids traced indexing into Python lists inside jit/vmap.
+        Avoids traced indexing into Python lists inside jit/vmap.
         """
 
         def make_case(k):
@@ -255,7 +256,6 @@ class PDE_solver:
         Returns:
             Array with shape `(M, d)` containing per-sample gradients.
         """
-        # Normalize shapes
         M = x.shape[0]
         x_flat = x.reshape(M, -1)
         if t.ndim == 0:
@@ -268,7 +268,7 @@ class PDE_solver:
             return self._grad_log_h_params_switch(i, xs, ts)
 
         grads = jax.vmap(per_sample)(idxs, x_flat, t)
-        # grads comes back as (M, 1, d_flat); squeeze the singleton batch axis
+        # grads has shape (M, 1, d_flat); squeeze the singleton batch axis
         if grads.ndim == 3 and grads.shape[1] == 1:
             grads = jnp.squeeze(grads, axis=1)
         return grads

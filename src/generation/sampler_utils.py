@@ -1,3 +1,10 @@
+"""Sampling utilities for unconditional, linear-guided, and PDE-guided draws.
+
+Wraps common sampler configurations used in experiments: plain diffusion
+sampling, WAN-style linear constraints, and PDE-guided sampling via custom
+drift updates.
+"""
+
 import jax
 import jax.numpy as jnp
 from swirl_dynamics.lib import diffusion as dfn_lib
@@ -20,6 +27,17 @@ with open(args.config, "r") as f:
 def sample_unconditional(
     diffusion_scheme, denoise_fn, rng_key: jax.Array, num_samples: int
 ):
+    """Generate unconditional samples using an SDE sampler.
+
+    Args:
+        diffusion_scheme: Diffusion schedule object.
+        denoise_fn: Callable denoiser inference function.
+        rng_key: JAX PRNG key for sampling.
+        num_samples: Number of independent samples to draw.
+
+    Returns:
+        Array of generated samples with shape `(num_samples, d, 1)`.
+    """
     sampler = dfn_lib.SdeSampler(
         input_shape=(run_sett["general"]["d"], 1),
         integrator=solver_lib.EulerMaruyama(),
@@ -45,9 +63,24 @@ def sample_wan_guided(
     rng_key: jax.Array,
     num_samples: int,
 ):
-    downsampling_factor = int(run_sett["general"]["d"]) / int(
+    """Generate samples with linear constraint guidance as per Wan et al. (2023).
+
+    Constructs a binary downsampling matrix `C_prime` and applies a linear
+    constraint so that `C_prime @ x ≈ y_bar` during sampling.
+
+    Args:
+        diffusion_scheme: Diffusion schedule object.
+        denoise_fn: Callable denoiser inference function.
+        y_bar: Target low-resolution conditions; shape `(M, d')` or `(d',)`.
+        rng_key: JAX PRNG key for sampling.
+        num_samples: Number of independent samples to draw.
+
+    Returns:
+        Array of generated samples with shape `(num_samples, d, 1)`.
+    """
+    downsampling_factor = int(run_sett["general"]["d"]) // int(
         run_sett["general"]["d_prime"]
-    )  # ensure integer stride
+    )
     C_prime = jnp.array(
         [
             [
@@ -87,6 +120,23 @@ def sample_pde_guided(
     rng_key: jax.Array,
     samples_per_condition: int,
 ):
+    """Generate samples guided by our additional gradient term.
+
+    Uses a custom sampler with drift adjustments provided by
+    `pde_solver.grad_log_h_batched_one_per_model`.
+
+    Args:
+        diffusion_scheme: Diffusion schedule object.
+        denoise_fn: Callable denoiser inference function.
+        pde_solver: Solver exposing `grad_log_h_batched_one_per_model` and
+            attribute `num_models`.
+        rng_key: JAX PRNG key for sampling.
+        samples_per_condition: Number of batches; each batch generates
+            `pde_solver.num_models` samples.
+
+    Returns:
+        Array with shape `(samples_per_condition, num_models, d, 1)`.
+    """
     sampler = NewDriftSdeSampler(
         input_shape=(run_sett["general"]["d"], 1),
         integrator=solver_lib.EulerMaruyama(),

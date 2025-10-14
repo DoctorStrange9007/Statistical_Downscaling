@@ -30,6 +30,22 @@ def _as_tuple(value):
 
 
 def vp_linear_beta_schedule(beta_min: float = None, beta_max: float = None):
+    """Construct an invertible variance-preserving linear-β noise schedule.
+
+    The schedule follows a linear β(t) in t and defines a mapping between
+    time t ∈ [0, 1] and noise scale σ via
+    forward(t) = sqrt(expm1(0.5 * (β_max-β_min) * t^2 + β_min * t)).
+
+    If `beta_min`/`beta_max` are not provided, values are read from
+    `run_sett['general']['beta_min']` and `run_sett['general']['beta_max']`.
+
+    Args:
+        beta_min: Optional lower bound for β. Defaults to config.
+        beta_max: Optional upper bound for β. Defaults to config.
+
+    Returns:
+        dfn_lib.InvertibleSchedule with `forward(t)` and `inverse(σ)`.
+    """
     beta_min = float(
         beta_min if beta_min is not None else run_sett["general"]["beta_min"]
     )
@@ -47,6 +63,14 @@ def vp_linear_beta_schedule(beta_min: float = None, beta_max: float = None):
 
 
 def create_denoiser_model():
+    """Instantiate the UNet denoiser from configuration.
+
+    Hyperparameters are read from `run_sett['UNET']` and passed to
+    `dfn_lib.PreconditionedDenoiserUNet`.
+
+    Returns:
+        dfn_lib.PreconditionedDenoiserUNet ready to be wrapped in a model.
+    """
     return dfn_lib.PreconditionedDenoiserUNet(
         out_channels=int(run_sett["UNET"]["out_channels"]),
         num_channels=_as_tuple(run_sett["UNET"]["num_channels"]),
@@ -61,6 +85,17 @@ def create_denoiser_model():
 
 
 def create_diffusion_scheme(data_std: float):
+    """Create a variance-preserving diffusion scheme.
+
+    Uses the variance-preserving linear-β schedule from
+    `vp_linear_beta_schedule()` and the provided `data_std`.
+
+    Args:
+        data_std: Standard deviation of the training data distribution.
+
+    Returns:
+        dfn_lib.Diffusion configured for variance preservation.
+    """
     return dfn_lib.Diffusion.create_variance_preserving(
         sigma=vp_linear_beta_schedule(),
         data_std=data_std,
@@ -68,6 +103,15 @@ def create_diffusion_scheme(data_std: float):
 
 
 def restore_denoise_fn(checkpoint_dir: str, denoiser_model):
+    """Restore an EMA denoising inference function from a checkpoint.
+
+    Args:
+        checkpoint_dir: Directory containing Orbax checkpoints.
+        denoiser_model: Model architecture to pair with restored parameters.
+
+    Returns:
+        A callable `denoise_fn` suitable for inference, using EMA parameters.
+    """
     trained_state = dfn.DenoisingModelTrainState.restore_from_orbax_ckpt(
         checkpoint_dir, step=None
     )
@@ -77,6 +121,20 @@ def restore_denoise_fn(checkpoint_dir: str, denoiser_model):
 
 
 def build_model(denoiser_model, diffusion_scheme, data_std: float):
+    """Wrap the denoiser into a `DenoisingModel` with sampling/weighting.
+
+    The input shape is `(d, 1)` where `d` is read from `run_sett['general']['d']`.
+    Time sampling uses `time_uniform_sampling` over the diffusion scheme and
+    noise weighting uses EDM weighting parameterized by `data_std`.
+
+    Args:
+        denoiser_model: The UNet-like denoiser module.
+        diffusion_scheme: The diffusion schedule object.
+        data_std: Standard deviation of the data, used for weighting.
+
+    Returns:
+        dfn.DenoisingModel ready for training.
+    """
     return dfn.DenoisingModel(
         input_shape=(int(run_sett["general"]["d"]), 1),
         denoiser=denoiser_model,
@@ -90,6 +148,17 @@ def build_model(denoiser_model, diffusion_scheme, data_std: float):
 
 
 def build_trainer(model):
+    """Create a `DenoisingTrainer` with optimizer, RNG, and EMA from config.
+
+    The optimizer applies gradient clipping and Adam with a warmup cosine decay
+    schedule. RNG seed and EMA decay are sourced from `run_sett`.
+
+    Args:
+        model: The `dfn.DenoisingModel` to train.
+
+    Returns:
+        dfn.DenoisingTrainer configured for training.
+    """
     return dfn.DenoisingTrainer(
         model=model,
         rng=jax.random.PRNGKey(int(run_sett["rng_key"])),
@@ -123,7 +192,37 @@ def run_training(
     save_interval_steps: int = run_sett["general"]["save_interval_steps"],
     max_to_keep: int = run_sett["general"]["max_to_keep"],
 ):
-    """Wrapper around templates.run_train with standard callbacks/checkpointing."""
+    """Train the model with standard progress and checkpoint callbacks.
+
+    Thin wrapper around `templates.run_train` that runs training in batches of
+    `metric_aggregation_steps`, aggregates metrics within each batch, and logs
+    them via `metric_writer`. If `eval_dataloader` is provided, evaluation runs
+    every `eval_every_steps` steps. Note that `eval_every_steps` must be an
+    integer multiple of `metric_aggregation_steps` (otherwise a `ValueError` is
+    raised by the underlying template). By default, when an evaluation loader is
+    given, the template performs a single sanity evaluation batch before
+    training starts.
+
+    Args:
+        train_dataloader: Infinite/long iterator of training batches.
+        trainer: `dfn.DenoisingTrainer` instance.
+        workdir: Directory for logs and checkpoints.
+        total_train_steps: Total number of optimization steps.
+        metric_writer: Writer for scalar metrics.
+        metric_aggregation_steps: Number of steps over which to aggregate metrics.
+        eval_dataloader: Iterator of evaluation batches (optional).
+        eval_every_steps: Evaluation frequency in steps; must divide by
+            `metric_aggregation_steps`.
+        num_batches_per_eval: Number of batches per evaluation run.
+        save_interval_steps: Checkpoint save frequency.
+        max_to_keep: Maximum number of checkpoints to retain.
+
+    Returns:
+        None.
+
+    Notes:
+        Adds `TqdmProgressBar` and `TrainStateCheckpoint` callbacks.
+    """
     return templates.run_train(
         train_dataloader=train_dataloader,
         trainer=trainer,

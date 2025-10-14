@@ -1,3 +1,11 @@
+"""KS statistical downscaling PDE built on a DGM and diffusion schedule.
+
+Defines the PDE residual and terminal losses used for conditional sampling with
+linear observations Cx = y. The solver uses a Deep Galerkin Network (DGM) for
+V(t, x) and derives drift/diffusion terms from a provided diffusion scheme and
+denoiser.
+"""
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,10 +32,10 @@ def dsquare_dt(f: diffusion.ScheduleFn) -> diffusion.ScheduleFn:
 
 
 class KSStatisticalDownscalingPDESolver(PDE_solver):
-    """PDE for statistical downscaling with linear constraint Cx=y.
+    """PDE for statistical downscaling with linear observation Cx = y.
 
-    Implements the loss used in the previous monolithic solver, including
-    the reverse-time SDE drift components through grad_log and beta schedule.
+    Implements interior-residual and terminal losses using a DGM for V(t, x)
+    and drift/diffusion terms derived from a diffusion scheme and denoiser.
     """
 
     def __init__(
@@ -42,9 +50,13 @@ class KSStatisticalDownscalingPDESolver(PDE_solver):
         """Initialize the statistical downscaling PDE solver.
 
         Args:
-            grad_log: Callable `(x, t) -> grad log p(x, t)` defining the score.
-            samples: Training samples used for constructing constraints.
-            settings: Hierarchical settings dictionary.
+            samples: Training samples (may be used by downstream utilities).
+            y_bar: Conditioning observations at low resolution; shape `(M, d')`
+                or `(d',)`.
+            settings: Hierarchical settings dictionary for base solver and DGM.
+            denoise_fn: Callable denoiser used in drift construction.
+            scheme: Diffusion scheme providing `sigma`, `scale`, and their
+                derivatives via autodiff.
             rng_key: Optional PRNG key for deterministic initialization.
         """
         super().__init__(settings=settings, rng_key=rng_key)
@@ -60,6 +72,14 @@ class KSStatisticalDownscalingPDESolver(PDE_solver):
     @partial(jax.jit, static_argnums=0)
     def loss_fn(self, params, t_interior, x_interior, t_terminal, x_terminal, y_bar):
         """Compute PDE residual and terminal losses for downscaling.
+
+        Args:
+            params: DGM parameters.
+            t_interior: Interior times `(B, 1)`.
+            x_interior: Interior states `(B, d)`.
+            t_terminal: Terminal times `(B, 1)` (typically all T).
+            x_terminal: Terminal states `(B, d)`.
+            y_bar: Target low-resolution constraints; `(d',)` or `(d', 1)`.
 
         Returns:
             Tuple `(L1, L3, total)` where `L1` is interior residual MSE and
@@ -85,15 +105,12 @@ class KSStatisticalDownscalingPDESolver(PDE_solver):
         )
         V_xx = jax.vmap(lambda ts, xs: H_fn(xs, ts.squeeze()))(t_interior, x_interior)
 
-        # b_bar and diffusion trace term
-        # bbar = self.b_bar(t_interior, x_interior)
-        # disp2 = (self.g(self.T - t_interior) ** 2).reshape(-1)
+        # Diffusion trace term
         trace_term = jax.vmap(lambda m: jnp.trace(m))(V_xx)
 
         def _drift(x: Array, t: Array) -> Array:
-            x = x[
-                None, ..., None
-            ]  # do it sample for sample as we have to take s_n=(t_n, x_n) pair together
+            # Evaluate drift for a single sample (x, t)
+            x = x[None, ..., None]
             assert not t.ndim, "`t` must be a scalar."
             s, sigma = self.scheme.scale(t), self.scheme.sigma(t)
             x_hat = jnp.divide(x, s)

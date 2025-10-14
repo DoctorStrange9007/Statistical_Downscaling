@@ -1,3 +1,5 @@
+"""Metric utilities for constraint RMSE, variability, KLD, and MELR."""
+
 import jax.numpy as jnp
 from jax.scipy.stats import gaussian_kde
 from jax.scipy.integrate import trapezoid
@@ -8,38 +10,19 @@ from functools import partial
 def _single_calculate_constraint_rmse(
     predicted_samples: jnp.ndarray, condition_reference_samples: jnp.ndarray
 ) -> float:
-    """Calculates the constraint Relative Root Mean Squared Error (RMSE) using JAX.
+    """Calculate relative RMSE between predicted and reference samples as defined in the supplementary material (note the choice of the denominator).
 
-    This function implements the formula for Relative RMSE as defined in
-    Appendix C.1 of the supplementary material (Eq. 33). It applies a
-    transformation matrix C to the predicted samples, computes the
-    L2 norm of the difference between each transformed predicted sample and
-    a reference sample, divides it by the L2 norm of the reference sample,
-    and then averages these relative errors over all samples in the batch.
+    Computes per-sample L2 error divided by the predicted sample L2 norm,
+    then averages over the batch.
 
     Args:
-        predicted_samples: A JAX array of predicted samples. Expected shape
-            is (N, ...), where N is the number of samples.
-        condition_reference_samples: A JAX array of condition reference samples (conditioning used for generation).
-            Expected shape is (N, ...), matching the predicted_samples.
-    Returns:
-        The mean relative RMSE as a float.
-
-    Raises:
-        ValueError: If the number of predicted and reference samples do not match
-            after the transformation.
+        predicted_samples: Array of predicted samples shaped (N, ...).
+        condition_reference_samples: Array of reference samples shaped (N, ...).
     """
 
-    # Calculate the L2 norm of the difference for each sample
     diff_norm = jnp.linalg.norm(predicted_samples - condition_reference_samples, axis=1)
-
-    # Calculate the L2 norm of the reference for each sample
     predicted_norm = jnp.linalg.norm(predicted_samples, axis=1)
-
-    # Use jnp.where for safe division to avoid division by zero
     relative_errors = jnp.where(predicted_norm != 0, diff_norm / predicted_norm, 0.0)
-
-    # Return the mean of the relative errors
     return jnp.mean(relative_errors)
 
 

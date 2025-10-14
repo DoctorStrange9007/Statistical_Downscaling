@@ -1,3 +1,5 @@
+"""Entry point for KS statistical downscaling: train or sample the model."""
+
 import os
 import sys
 import jax
@@ -59,12 +61,9 @@ def log_fn(payload: dict):
 
 
 def main():
-    project_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )  # local machine
-    work_dir = os.path.join(
-        project_root, "temporary", "main_generation_KS"
-    )  # FOR A FRESH RUN empty temporary/
+    """Run training or sampling depending on `mode`."""
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    work_dir = os.path.join(project_root, "temporary", "main_generation_KS")
     os.makedirs(work_dir, exist_ok=True)
 
     u_HFHR, u_LFLR, u_HFLR, x, t = get_raw_datasets()
@@ -78,7 +77,6 @@ def main():
 
     mode = "sample"
 
-    # Create a unified metric writer once (W&B-backed if enabled)
     use_wandb = bool(USE_WANDB and not os.environ.get("WANDB_DISABLED"))
     base_writer = metric_writers.create_default_writer(work_dir, asynchronous=False)
     if use_wandb:
@@ -96,11 +94,9 @@ def main():
     else:
         writer = base_writer
     if mode == "train":
-        print("--- Running in Training Mode ---")
+        print("Running in training mode…")
         model = build_model(denoiser_model, diffusion_scheme, DATA_STD)
         trainer = build_trainer(model)
-
-        # writer already initialized above
 
         run_training(
             train_dataloader=get_ks_dataset(
@@ -124,15 +120,11 @@ def main():
             max_to_keep=run_sett["general"]["max_to_keep"],
         )
 
-        # writer is closed at the end of main()
-
         denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
         if run_sett["option"] == "conditional":
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
-                y_bar=u_lflr_samples[
-                    0 : int(run_sett["pde_solver"]["num_models"])
-                ],  # can do this for any sample, maybe code this down better such that we can extend this to multiple samples at once
+                y_bar=u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
                 settings=run_sett,
                 denoise_fn=denoise_fn,
                 scheme=diffusion_scheme,
@@ -156,10 +148,10 @@ def main():
             pde_solver.save_params(pde_params_dir)
 
     elif mode == "sample":
-        print("--- Running in Sampling-Only Mode ---")
-        downsampling_factor = int(run_sett["general"]["d"]) / int(
+        print("Running in sampling-only mode…")
+        downsampling_factor = int(run_sett["general"]["d"]) // int(
             run_sett["general"]["d_prime"]
-        )  # ensure integer stride
+        )
         C_prime = jnp.array(
             [
                 [
@@ -171,9 +163,6 @@ def main():
         )
         denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
         if run_sett["option"] == "unconditional":
-            ##########################################################
-            #### GENERATES UNCONDITIONAL SAMPLES ####
-
             samples = sample_unconditional(
                 diffusion_scheme,
                 denoise_fn,
@@ -182,8 +171,6 @@ def main():
             )
 
         elif run_sett["option"] == "wan_conditional":
-            ##########################################################
-            #### GENERATES CONDITIONAL SAMPLES as per WAN et al. - passed through the gudance_transforms argument ####
             samples = sample_wan_guided(
                 diffusion_scheme,
                 denoise_fn,
@@ -192,9 +179,6 @@ def main():
                 num_samples=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
         elif run_sett["option"] == "conditional":
-            ##########################################################
-            #### GENERATES CONDITIONAL SAMPLES as per our paper ####
-            # Save PDE params_list for post-training sampling
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
                 y_bar=u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
@@ -212,10 +196,7 @@ def main():
                 rng_key=jax.random.PRNGKey(8888),
                 samples_per_condition=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
-
             print(jnp.mean(samples))
-            ##########################################################
-            #### CALCULATES METRICS ####
             constraint_rmse = calculate_constraint_rmse(
                 samples,
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],

@@ -1,3 +1,10 @@
+"""Deep Galerkin Network (DGM) components implemented in JAX.
+
+Provides a recurrent DGM block (`LSTMLayerJax`), an affine layer with optional
+nonlinearity (`DenseLayerJax`), and a full network (`DGMNetJax`) that stacks
+these components to approximate PDE solutions.
+"""
+
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -5,6 +12,12 @@ from typing import Optional
 
 
 class LSTMLayerJax(nn.Module):
+    """Recurrent block used in Deep Galerkin Networks (DGM).
+
+    Implements gated updates resembling LSTM to evolve a hidden state given
+    the current concatenated input [t, x].
+    """
+
     input_dim: int
     output_dim: int
 
@@ -44,6 +57,8 @@ class LSTMLayerJax(nn.Module):
 
 
 class DenseLayerJax(nn.Module):
+    """Affine layer with optional nonlinearity."""
+
     input_dim: int
     output_dim: int
     transformation: Optional[str] = None  # 'tanh', 'relu', or None
@@ -71,6 +86,12 @@ class DenseLayerJax(nn.Module):
 
 
 class DGMNetJax(nn.Module):
+    """Deep Galerkin Network (DGM) implemented with Flax.
+
+    Stacks an initial dense layer, multiple recurrent DGM blocks, and a final
+    projection to produce a scalar PDE solution estimate.
+    """
+
     input_dim: int  # spatial input dimension d
     layer_width: int
     num_layers: int

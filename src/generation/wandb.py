@@ -1,3 +1,10 @@
+"""Weights & Biases adapter that mirrors `clu.metric_writers` interface.
+
+This module provides `WandbWriter`, a thin wrapper that forwards writes to a
+base metric writer (e.g., `clu.metric_writers.MultiWriter`) while also logging
+to W&B when available and enabled.
+"""
+
 import os
 
 try:
@@ -7,15 +14,24 @@ except Exception:  # wandb is optional
 
 
 class WandbWriter:
-    """Adapter that mirrors clu.metric_writers to Weights & Biases.
+    """Adapter that mirrors `clu.metric_writers` to Weights & Biases.
 
-    It forwards writes to a provided base writer (e.g., clu.metric_writers)
-    while also logging to W&B when available and enabled.
+    Forwards writes to a provided base writer and additionally logs to W&B
+    when the library is available and not disabled via the environment.
     """
 
     def __init__(
         self, base_writer, *, project: str, name: str, entity: str = None, config=None
     ):
+        """Initialize the adapter.
+
+        Args:
+            base_writer: Underlying writer implementing `write_scalars`, etc.
+            project: W&B project name.
+            name: W&B run name.
+            entity: Optional W&B entity (team or user).
+            config: Optional configuration dict to attach to the run.
+        """
         self.base_writer = base_writer
         self._step = 0
         self._active = bool(wandb is not None and not os.environ.get("WANDB_DISABLED"))
@@ -33,9 +49,11 @@ class WandbWriter:
                 self._active = False
 
     def __getattr__(self, item):
+        """Proxy unknown attributes to the underlying base writer."""
         return getattr(self.base_writer, item)
 
     def set_step(self, step: int):
+        """Set the current global step for both base writer and W&B."""
         self._step = int(step)
         try:
             if hasattr(self.base_writer, "set_step"):
@@ -44,6 +62,12 @@ class WandbWriter:
             pass
 
     def write_scalars(self, *args, **kwargs):
+        """Write a dictionary of scalar metrics, and mirror to W&B.
+
+        Accepts either positional form `(step, scalars)` or keyword form
+        `write_scalars(step=..., scalars={...})`. If `step` is omitted, the
+        last set step is used.
+        """
         step = kwargs.pop("step", None)
         scalars = kwargs.pop("scalars", None)
         if scalars is None and args:
@@ -72,6 +96,7 @@ class WandbWriter:
                 pass
 
     def write_hparams(self, hparams):
+        """Write hyperparameters to the base writer and W&B config."""
         try:
             if hasattr(self.base_writer, "write_hparams"):
                 self.base_writer.write_hparams(hparams)
@@ -84,12 +109,16 @@ class WandbWriter:
                 pass
 
     def write_images(self, *args, **kwargs):
+        """Write images via base writer and mirror to W&B if active.
+
+        Expects keyword argument `images` as a mapping from name to image array.
+        """
         try:
             if hasattr(self.base_writer, "write_images"):
                 self.base_writer.write_images(*args, **kwargs)
         except Exception:
             pass
-        images = kwargs.get("images") if isinstance(kwargs, dict) else None
+        images = kwargs.get("images")
         if self._active and images:
             try:
                 wandb.log(
@@ -99,6 +128,7 @@ class WandbWriter:
                 pass
 
     def flush(self):
+        """Flush the base writer buffers if supported."""
         try:
             if hasattr(self.base_writer, "flush"):
                 self.base_writer.flush()
@@ -106,6 +136,7 @@ class WandbWriter:
             pass
 
     def close(self):
+        """Close the base writer and finish the W&B run if active."""
         try:
             if hasattr(self.base_writer, "close"):
                 self.base_writer.close()

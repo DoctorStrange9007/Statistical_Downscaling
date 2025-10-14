@@ -4,6 +4,25 @@ import tensorflow as tf
 
 
 def get_raw_datasets(file_name="data/ks_trajectories_512.h5", ds_x=4):
+    """Load KS trajectory datasets from an HDF5 file and derive a downsampled field.
+
+    This reads the low-fidelity, low-resolution (`LFLR`), high-fidelity, high-resolution (`HFHR`),
+    time (`t`), and space (`x`) arrays from the HDF5 file. It also constructs a
+    high-fidelity, low-resolution array (`HFLR`) by downsampling `HFHR` along the spatial axis
+    by a stride of `ds_x`.
+
+    Args:
+        file_name: Path to an HDF5 file containing datasets 'LFLR', 'HFHR', 't', and 'x'.
+        ds_x: Positive integer stride used to downsample the spatial axis of `HFHR` to form `HFLR`.
+
+    Returns:
+        Tuple `(u_HFHR, u_LFLR, u_HFLR, x, t)` where each element is a NumPy array.
+        `u_HFLR` is computed as `u_HFHR[:, :, ::ds_x]`.
+
+    Raises:
+        FileNotFoundError: If the HDF5 file cannot be found.
+        KeyError: If required datasets are missing from the file.
+    """
     with h5py.File(file_name, "r+") as f1:
         u_LFLR = f1["LFLR"][()]
         u_HFHR = f1["HFHR"][()]
@@ -15,15 +34,18 @@ def get_raw_datasets(file_name="data/ks_trajectories_512.h5", ds_x=4):
 
 
 def get_ks_dataset(u_samples: jnp.ndarray, split: str, batch_size: int):
-    """Returns a batched dataset from u_samples with the same interface as get_mnist_dataset.
+    """Create an infinite, batched NumPy iterator over samples for training.
 
     Args:
-        u_samples: Array of shape (N, 192, 1)
-        split: A TFDS-style split string (e.g., 'train[:75%]')
-        batch_size: Batch size for training
+        u_samples: Array-like of samples; each element is exposed under key 'x'.
+        split: One of 'train', 'train[:p%]', or 'train[p%:]' to select a prefix or suffix.
+        batch_size: Number of examples per batch.
 
     Returns:
-        A NumPy iterator over batches of {'x': ...}
+        A repeating, prefetching NumPy iterator yielding batches: {'x': array}.
+
+    Raises:
+        ValueError: If `split` is not one of the supported formats.
     """
     ds = tf.data.Dataset.from_tensor_slices({"x": u_samples.astype(jnp.float32)})
 
