@@ -58,7 +58,7 @@ class HR_data:
         self.beta_max = float(settings["general"]["beta_max"])
         self.T = float(settings["general"]["T"])
         self.d = int(settings["general"]["d"])
-        self.dt = float(settings["general"]["dt"])
+        self.dt = float(settings["easy_examples"]["dt"])
         self.n_samples = int(settings["easy_examples"]["n_samples_train"])
         self.rng = rng_key if rng_key is not None else jax.random.PRNGKey(37)
 
@@ -184,7 +184,7 @@ class HR_prior:
         """
         self.samples = samples
         self.d = settings["general"]["d"]
-        self.dt = settings["general"]["dt"]
+        self.dt = settings["easy_examples"]["dt"]
         self.T = settings["general"]["T"]
         self.batch_size = settings["general"]["batch_size"]
         self.beta_min = settings["general"]["beta_min"]

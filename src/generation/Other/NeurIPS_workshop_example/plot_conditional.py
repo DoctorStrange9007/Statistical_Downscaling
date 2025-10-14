@@ -26,7 +26,7 @@ class HR_data_conditional:
         self.T = float(settings["general"]["T"])
         self.batch_size = int(settings["pre_trained"]["data"]["batch_size"])
         self.d = int(settings["general"]["d"])
-        self.dt = float(settings["general"]["dt"])
+        self.dt = float(settings["easy_examples"]["dt"])
         self.n_samples = int(settings["general"]["n_samples"])
         self.rng = rng_key if rng_key is not None else jax.random.PRNGKey(37)
 
