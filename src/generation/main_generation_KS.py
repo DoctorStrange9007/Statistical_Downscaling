@@ -1,9 +1,16 @@
 import os
 import sys
 import jax
-import wandb
+
+try:
+    import wandb  # type: ignore
+except Exception:  # wandb is optional
+    wandb = None  # type: ignore
 import jax.numpy as jnp
 from clu import metric_writers
+from src.generation.wandb import WandbWriter
+import yaml
+import argparse
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from src.generation.Statistical_Downscaling_PDE_KS import (
@@ -18,21 +25,18 @@ from src.generation.denoiser_utils import (
     run_training,
 )
 
-from src.generation.utils_metrics import calculate_constraint_rmse
-from src.generation.utils_metrics import calculate_kld
-from src.generation.utils_metrics import calculate_sample_variability
-from src.generation.utils_metrics import calculate_melr
+from src.generation.utils_metrics import (
+    calculate_constraint_rmse,
+    calculate_kld,
+    calculate_sample_variability,
+    calculate_melr,
+)
 from src.generation.data_utils import get_raw_datasets, get_ks_dataset
 from src.generation.sampler_utils import (
     sample_unconditional,
     sample_wan_guided,
     sample_pde_guided,
 )
-
-import yaml
-import argparse
-
-USE_WANDB = False
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -42,21 +46,16 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-
-class WandbWriter:
-    pass
+USE_WANDB = False
 
 
 def log_fn(payload: dict):
     """Safe metric logger that no-ops if logging is disabled or fails."""
-    if USE_WANDB:
+    if USE_WANDB and (wandb is not None):
         try:
             wandb.log(payload)
         except Exception:
             pass
-
-
-## Data helpers moved to src/generation/data_utils.py
 
 
 def main():
@@ -78,26 +77,30 @@ def main():
     diffusion_scheme = create_diffusion_scheme(DATA_STD)
 
     mode = "sample"
+
+    # Create a unified metric writer once (W&B-backed if enabled)
+    use_wandb = bool(USE_WANDB and not os.environ.get("WANDB_DISABLED"))
+    base_writer = metric_writers.create_default_writer(work_dir, asynchronous=False)
+    if use_wandb:
+        project = os.environ.get("WANDB_PROJECT", "statistical-downscaling-denoiser-KS")
+        run_name = os.environ.get("WANDB_NAME", os.path.basename(work_dir))
+        entity = os.environ.get("WANDB_ENTITY")  # optional
+        writer_name = run_name if mode == "train" else f"{run_name}-sample"
+        writer = WandbWriter(
+            base_writer,
+            project=project,
+            name=writer_name,
+            entity=entity,
+            config={"work_dir": work_dir, "mode": mode, **run_sett},
+        )
+    else:
+        writer = base_writer
     if mode == "train":
         print("--- Running in Training Mode ---")
         model = build_model(denoiser_model, diffusion_scheme, DATA_STD)
         trainer = build_trainer(model)
 
-        use_wandb = USE_WANDB and not os.environ.get("WANDB_DISABLED")
-        if use_wandb:
-            project = os.environ.get(
-                "WANDB_PROJECT", "statistical-downscaling-denoiser-KS"
-            )
-            run_name = os.environ.get("WANDB_NAME", os.path.basename(work_dir))
-            entity = os.environ.get("WANDB_ENTITY")  # optional
-            writer = WandbWriter(
-                project=project,
-                name=run_name,
-                entity=entity,
-                config={"work_dir": work_dir},
-            )
-        else:
-            writer = metric_writers.create_default_writer(work_dir, asynchronous=False)
+        # writer already initialized above
 
         run_training(
             train_dataloader=get_ks_dataset(
@@ -120,6 +123,8 @@ def main():
             save_interval_steps=run_sett["general"]["save_interval_steps"],
             max_to_keep=run_sett["general"]["max_to_keep"],
         )
+
+        # writer is closed at the end of main()
 
         denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
         if run_sett["option"] == "conditional":
@@ -175,7 +180,6 @@ def main():
                 jax.random.PRNGKey(run_sett["rng_key"]),
                 num_samples=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
-            print(jnp.mean(samples))
 
         elif run_sett["option"] == "wan_conditional":
             ##########################################################
@@ -238,6 +242,28 @@ def main():
             print("sample_variability:", float(sample_variability))
             print("melr_weighted:", float(melr_weighted))
             print("melr_unweighted:", float(melr_unweighted))
+            try:
+                writer.write_scalars(
+                    scalars={
+                        "metrics/constraint_rmse": float(constraint_rmse),
+                        "metrics/kld": float(kld),
+                        "metrics/sample_variability": float(sample_variability),
+                        "metrics/melr_weighted": float(melr_weighted),
+                        "metrics/melr_unweighted": float(melr_unweighted),
+                    }
+                )
+            except Exception:
+                pass
+
+    # Flush/close the writer once
+    try:
+        writer.flush()
+    except Exception:
+        pass
+    try:
+        writer.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

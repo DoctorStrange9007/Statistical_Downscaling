@@ -1,7 +1,4 @@
-input_dir: 'src/generation/data/'
-input_dir_mappings: 'src/generation/data/'
 output_dir: 'src/generation/output/'
-input_fn: 'Input_file.xlsx'
 option: 'conditional'
 rng_key: 888
 general:
