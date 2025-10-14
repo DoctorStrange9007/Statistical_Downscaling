@@ -45,7 +45,8 @@ with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
 USE_WANDB = True
-mode = "sample"
+ALSO_TRAIN_PDE = False
+mode = "train"
 
 
 def main():
@@ -121,7 +122,7 @@ def main():
         )
 
         denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
-        if run_sett["option"] == "conditional":
+        if ALSO_TRAIN_PDE:
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
                 y_bar=u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],

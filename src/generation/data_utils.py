@@ -62,6 +62,21 @@ def get_ks_dataset(u_samples: jnp.ndarray, split: str, batch_size: int):
         raise ValueError(f"Unsupported split string: {split}")
 
     ds = ds.repeat()
+
+    def _random_roll_map_fn(data_dict):
+        sample = data_dict["x"]
+        # Generate a single random integer for the shift amount.
+        # The shift is along axis 0, the spatial dimension for KS data.
+        shift = tf.random.uniform(
+            shape=[], minval=0, maxval=sample.shape[0], dtype=tf.int32
+        )
+        # Apply the circular shift.
+        rolled_sample = tf.roll(sample, shift=shift, axis=0)
+        return {"x": rolled_sample}
+
+    # Apply the augmentation to each element in the dataset.
+    ds = ds.map(_random_roll_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = ds.as_numpy_iterator()
