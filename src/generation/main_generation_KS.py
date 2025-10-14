@@ -45,7 +45,7 @@ with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
 USE_WANDB = True
-mode = "train"
+mode = "sample"
 
 
 def main():
@@ -189,7 +189,7 @@ def main():
                 diffusion_scheme,
                 denoise_fn,
                 pde_solver,
-                rng_key=jax.random.PRNGKey(8888),
+                rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
                 samples_per_condition=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
             print(jnp.mean(samples))
@@ -198,21 +198,23 @@ def main():
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
                 C_prime,
             )
-            kld = calculate_kld(samples, u_hfhr_samples, epsilon=1e-10)
+            kld = calculate_kld(
+                samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
+            )
             sample_variability = calculate_sample_variability(samples)
             melr_weighted = calculate_melr(
                 samples,
                 u_hfhr_samples,
                 sample_shape=(run_sett["general"]["d"],),
                 weighted=True,
-                epsilon=1e-10,
+                epsilon=float(run_sett["epsilon"]),
             )
             melr_unweighted = calculate_melr(
                 samples,
                 u_hfhr_samples,
                 sample_shape=(run_sett["general"]["d"],),
                 weighted=False,
-                epsilon=1e-10,
+                epsilon=float(run_sett["epsilon"]),
             )
 
             writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
