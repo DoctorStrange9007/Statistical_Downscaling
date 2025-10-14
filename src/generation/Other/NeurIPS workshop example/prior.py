@@ -59,7 +59,7 @@ class HR_data:
         self.T = float(settings["general"]["T"])
         self.d = int(settings["general"]["d"])
         self.dt = float(settings["general"]["dt"])
-        self.n_samples = int(settings["general"]["n_samples_train"])
+        self.n_samples = int(settings["easy_examples"]["n_samples_train"])
         self.rng = rng_key if rng_key is not None else jax.random.PRNGKey(37)
 
     @staticmethod

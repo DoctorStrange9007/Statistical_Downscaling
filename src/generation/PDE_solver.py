@@ -37,8 +37,8 @@ class PDE_solver:
         self.d = int(settings["general"]["d"])
 
         # Network
-        hidden = int(settings["pre_trained"]["model"]["nodes_per_layer"])
-        n_layers = int(settings["pre_trained"]["model"]["num_layers"])
+        hidden = int(settings["DGM"]["nodes_per_layer"])
+        n_layers = int(settings["DGM"]["num_layers"])
         self.num_models = int(settings["pde_solver"]["num_models"])
         self.net = DGMNetJax(
             input_dim=self.d, layer_width=hidden, num_layers=n_layers, final_trans=None

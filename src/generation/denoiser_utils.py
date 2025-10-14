@@ -94,14 +94,14 @@ def build_trainer(model):
         model=model,
         rng=jax.random.PRNGKey(int(run_sett["rng_key"])),
         optimizer=optax.chain(
-            optax.clip_by_global_norm(float(run_sett["Optimizer"]["clip_norm"])),
+            optax.clip_by_global_norm(float(run_sett["optimizer"]["clip_norm"])),
             optax.adam(
                 learning_rate=optax.warmup_cosine_decay_schedule(
-                    init_value=float(run_sett["Optimizer"]["init_value"]),
-                    peak_value=float(run_sett["Optimizer"]["peak_value"]),
-                    warmup_steps=int(run_sett["Optimizer"]["warmup_steps"]),
-                    decay_steps=int(run_sett["Optimizer"]["decay_steps"]),
-                    end_value=float(run_sett["Optimizer"]["end_value"]),
+                    init_value=float(run_sett["optimizer"]["init_value"]),
+                    peak_value=float(run_sett["optimizer"]["peak_value"]),
+                    warmup_steps=int(run_sett["optimizer"]["warmup_steps"]),
+                    decay_steps=int(run_sett["optimizer"]["decay_steps"]),
+                    end_value=float(run_sett["optimizer"]["end_value"]),
                 ),
             ),
         ),

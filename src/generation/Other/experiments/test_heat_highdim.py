@@ -8,7 +8,7 @@ import jax.numpy as jnp
 # Ensure repository root on path for absolute-style imports when running as script
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from src.generation.Heat_PDE import HeatPDESolver, make_heat_settings
+from src.generation.Other.experiments.Heat_PDE import HeatPDESolver, make_heat_settings
 
 try:
     import wandb  # type: ignore
