@@ -8,9 +8,11 @@ import jax.numpy as jnp
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from prior import HR_data, HR_prior
-from Statistical_Downscaling_PDE import StatisticalDownscalingPDESolver
-import utils_generation as utils
+from src.generation.Other.NeurIPS_workshop_example.prior import HR_data, HR_prior
+from src.generation.Other.NeurIPS_workshop_example.Statistical_Downscaling_PDE import (
+    StatisticalDownscalingPDESolver,
+)
+from src.generation.Other.NeurIPS_workshop_example import utils_generation as utils
 
 try:
     import wandb  # type: ignore

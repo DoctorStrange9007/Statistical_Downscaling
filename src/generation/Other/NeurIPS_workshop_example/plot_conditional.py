@@ -2,7 +2,6 @@ import yaml
 import os
 import sys
 import argparse
-from datetime import datetime
 import jax
 import jax.numpy as jnp
 from functools import partial
@@ -11,7 +10,8 @@ from typing import Callable
 # Ensure repository root on path when running this file directly by path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.generation import utils_generation as utils
+from src.generation.Other.NeurIPS_workshop_example import utils_generation as utils
+
 
 class HR_data_conditional:
     def __init__(self, settings, rng_key: jax.Array | None = None):
@@ -140,6 +140,7 @@ class HR_data_conditional:
         samples_x_3 = jnp.zeros_like(samples_x_2)
         samples = jnp.stack([samples_x_1, samples_x_2, samples_x_3], axis=1)
         return samples
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -9,11 +9,11 @@ import jax.numpy as jnp
 # Ensure repository root on path when running this file directly by path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.generation.prior import HR_data, HR_prior
-from src.generation.Statistical_Downscaling_PDE import (
+from src.generation.Other.NeurIPS_workshop_example.prior import HR_data, HR_prior
+from src.generation.Other.NeurIPS_workshop_example.Statistical_Downscaling_PDE import (
     StatisticalDownscalingPDESolver,
 )
-from src.generation import utils_generation as utils
+from src.generation.Other.NeurIPS_workshop_example import utils_generation as utils
 
 try:
     import wandb  # type: ignore
