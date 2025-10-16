@@ -44,9 +44,9 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = True
+USE_WANDB = False
 ALSO_TRAIN_PDE = False
-mode = "train"
+mode = "sample"
 
 
 def main():
@@ -104,6 +104,7 @@ def main():
                 u_hfhr_samples,
                 split="train[:75%]",
                 batch_size=run_sett["general"]["batch_size"],
+                seed=int(run_sett["rng_key"]),
             ),
             trainer=trainer,
             workdir=work_dir,
@@ -114,6 +115,7 @@ def main():
                 u_hfhr_samples,
                 split="train[75%:]",
                 batch_size=run_sett["general"]["batch_size"],
+                seed=int(run_sett["rng_key"]),
             ),
             eval_every_steps=run_sett["general"]["eval_every_steps"],
             num_batches_per_eval=run_sett["general"]["num_batches_per_eval"],
@@ -166,7 +168,7 @@ def main():
                 jax.random.PRNGKey(run_sett["rng_key"]),
                 num_samples=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
-
+            print(jnp.mean(samples))
         elif run_sett["option"] == "wan_conditional":
             samples = sample_wan_guided(
                 diffusion_scheme,

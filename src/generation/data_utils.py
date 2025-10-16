@@ -1,6 +1,7 @@
 import h5py
 import jax.numpy as jnp
 import tensorflow as tf
+from typing import Optional
 
 
 def get_raw_datasets(file_name, ds_x=4):
@@ -33,23 +34,41 @@ def get_raw_datasets(file_name, ds_x=4):
     return u_HFHR, u_LFLR, u_HFLR, x, t
 
 
-def get_ks_dataset(u_samples: jnp.ndarray, split: str, batch_size: int):
-    """Create an infinite, batched NumPy iterator over samples for training.
+def get_ks_dataset(
+    u_samples: jnp.ndarray, split: str, batch_size: int, seed: Optional[int] = None
+):
+    """Create a seeded random, infinite, batched NumPy iterator of KS samples.
+
+    The pipeline:
+    - casts `u_samples` to float32,
+    - optionally subsets via `split`,
+    - repeats indefinitely,
+    - applies a deterministic circular shift to each element using stateless RNG
+      keyed by `(seed, sample_index % len(u_samples))`,
+    - batches and prefetches, returning a NumPy iterator of dicts {'x': array}.
 
     Args:
-        u_samples: Array-like of samples; each element is exposed under key 'x'.
-        split: One of 'train', 'train[:p%]', or 'train[p%:]' to select a prefix or suffix.
+        u_samples: Array-like of shape (N, L, 1) containing KS fields. Cast to float32.
+        split: 'train', 'train[:p%]' to take a prefix, or 'train[p%:]' to take a suffix.
         batch_size: Number of examples per batch.
+        seed: Base RNG seed for stateless, per-sample circular shifts. Must be provided
+            to ensure reproducible augmentation.
 
     Returns:
-        A repeating, prefetching NumPy iterator yielding batches: {'x': array}.
+        An endless NumPy iterator yielding dictionaries with key 'x' and value of
+        shape (batch_size, L, 1).
+
+    Determinism:
+        Given the same `u_samples`, `split`, `batch_size`, and `seed`, the iterator
+        yields identical batches across runs. Each element receives a distinct shift
+        drawn uniformly from [0, L), fixed by its index.
 
     Raises:
         ValueError: If `split` is not one of the supported formats.
     """
     ds = tf.data.Dataset.from_tensor_slices({"x": u_samples.astype(jnp.float32)})
-
     total_len = len(u_samples)
+
     if split == "train":
         pass
     elif split.startswith("train[:"):
@@ -61,22 +80,29 @@ def get_ks_dataset(u_samples: jnp.ndarray, split: str, batch_size: int):
     else:
         raise ValueError(f"Unsupported split string: {split}")
 
+    options = tf.data.Options()
+    options.experimental_deterministic = True
+    ds = ds.with_options(options)
     ds = ds.repeat()
+    global_seed = tf.cast(int(seed), tf.int32)
+    ds = ds.enumerate()
 
-    def _random_roll_map_fn(data_dict):
+    def _seeded_random_roll_map_fn(index, data_dict):
         sample = data_dict["x"]
-        # Generate a single random integer for the shift amount.
-        # The shift is along axis 0, the spatial dimension for KS data.
-        shift = tf.random.uniform(
-            shape=[], minval=0, maxval=sample.shape[0], dtype=tf.int32
+        sample_len = tf.shape(sample)[0]
+        idx_mod = tf.math.floormod(index, tf.cast(total_len, tf.int64))
+        idx_mod_i32 = tf.cast(idx_mod, tf.int32)
+        shift = tf.random.stateless_uniform(
+            shape=[],
+            minval=0,
+            maxval=sample_len,
+            dtype=tf.int32,
+            seed=tf.stack([global_seed, idx_mod_i32]),
         )
-        # Apply the circular shift.
         rolled_sample = tf.roll(sample, shift=shift, axis=0)
         return {"x": rolled_sample}
 
-    # Apply the augmentation to each element in the dataset.
-    ds = ds.map(_random_roll_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
-
+    ds = ds.map(_seeded_random_roll_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     ds = ds.as_numpy_iterator()
