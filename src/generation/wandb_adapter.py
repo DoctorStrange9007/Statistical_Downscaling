@@ -88,7 +88,8 @@ class WandbWriter:
         self.base_writer.write_scalars(step=step, scalars=scalars)
 
         if self._active and scalars and (wandb is not None):
-            wandb.log(dict(scalars))
+            # Ensure W&B uses the provided/global step rather than auto-incrementing
+            wandb.log(dict(scalars), step=step)
 
     def write_scalar(self, name: str, value):
         """Convenience: write a single scalar by name.
@@ -96,7 +97,8 @@ class WandbWriter:
         This avoids step management and mirrors directly to W&B when active.
         """
         if self._active and (wandb is not None):
-            wandb.log({name: value})
+            # Keep W&B step aligned with our tracked step
+            wandb.log({name: value}, step=self._step)
 
     def write_hparams(self, hparams):
         """Write hyperparameters to the base writer and W&B config."""
