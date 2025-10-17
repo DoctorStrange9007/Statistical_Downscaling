@@ -25,7 +25,6 @@ from src.generation.denoiser_utils import (
 
 from src.generation.utils_metrics import (
     calculate_constraint_rmse,
-    calculate_kld,
     calculate_sample_variability,
     calculate_melr,
 )
@@ -169,14 +168,22 @@ def main():
                 num_samples=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
             print(jnp.mean(samples))
+            print(samples.std())
         elif run_sett["option"] == "wan_conditional":
+            num_models = int(run_sett["pde_solver"]["num_models"])  # C
+            samples_per_condition = int(run_sett["pde_solver"]["num_gen_samples"])  # N
+            y_bars = u_lflr_samples[:num_models]
+
             samples = sample_wan_guided(
                 diffusion_scheme,
                 denoise_fn,
-                y_bar=u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
+                y_bar=y_bars,
                 rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
-                num_samples=int(run_sett["pde_solver"]["num_gen_samples"]),
+                num_samples=samples_per_condition,
             )
+            print(samples.std())
+            print(samples.shape)
+            a = 2
         elif run_sett["option"] == "conditional":
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
@@ -201,9 +208,9 @@ def main():
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
                 C_prime,
             )
-            kld = calculate_kld(
-                samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
-            )
+            # kld = calculate_kld(
+            #    samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
+            # )
             sample_variability = calculate_sample_variability(samples)
             melr_weighted = calculate_melr(
                 samples,
@@ -220,11 +227,12 @@ def main():
                 epsilon=float(run_sett["epsilon"]),
             )
 
-            writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
-            writer.write_scalar("metrics/kld", float(kld))
-            writer.write_scalar("metrics/sample_variability", float(sample_variability))
-            writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
-            writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
+            print(constraint_rmse, sample_variability, melr_weighted, melr_unweighted)
+            # writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
+            # writer.write_scalar("metrics/kld", float(kld))
+            # writer.write_scalar("metrics/sample_variability", float(sample_variability))
+            # writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
+            # writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
 
     # Flush/close the writer once
     try:

@@ -63,20 +63,22 @@ def sample_wan_guided(
     rng_key: jax.Array,
     num_samples: int,
 ):
-    """Generate samples with linear constraint guidance as per Wan et al. (2023).
+    """WAN-style guided sampling for a batch of conditions.
 
-    Constructs a binary downsampling matrix `C_prime` and applies a linear
-    constraint so that `C_prime @ x ≈ y_bar` during sampling.
+    Builds a binary downsampling matrix `C_prime` and applies a linear constraint of Wan er al. (2023). Given a batch of `C`
+    conditions in `y_bar`, this function generates `num_samples` independent draws, resulting
+    in an output of shape `(N, C, d, 1)`.
 
     Args:
         diffusion_scheme: Diffusion schedule object.
         denoise_fn: Callable denoiser inference function.
-        y_bar: Target low-resolution conditions; shape `(M, d')` or `(d',)`.
+        y_bar: Target low-resolution conditions; shape `(C, d')`.
         rng_key: JAX PRNG key for sampling.
-        num_samples: Number of independent samples to draw.
-
+        num_samples: Number of independent samples to draw `(N)`.
     Returns:
-        Array of generated samples with shape `(num_samples, d, 1)`.
+        Array with shape `(N, C, d, 1)`, where the first axis indexes
+        independent draws (each with a different RNG) and the second axis
+        indexes the `C` conditions in `y_bar`.
     """
     downsampling_factor = int(run_sett["general"]["d"]) // int(
         run_sett["general"]["d_prime"]
@@ -110,7 +112,10 @@ def sample_wan_guided(
         return_full_paths=False,
     )
     generate = jax.jit(sampler.generate, static_argnames=("num_samples",))
-    return generate(rng=rng_key, num_samples=num_samples)
+    inner_num = int(y_bar.shape[0])  # should be same dimensions of conditions in y_bar
+    keys = jax.random.split(rng_key, num_samples)
+    batched_generate = jax.vmap(lambda k: generate(rng=k, num_samples=inner_num))
+    return batched_generate(keys)
 
 
 def sample_pde_guided(
