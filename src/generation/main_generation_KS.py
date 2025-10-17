@@ -31,7 +31,7 @@ from src.generation.utils_metrics import (
 from src.generation.data_utils import get_raw_datasets, get_ks_dataset
 from src.generation.sampler_utils import (
     sample_unconditional,
-    sample_wan_guided,
+    less_memory_sample_wan_guided,
     sample_pde_guided,
 )
 
@@ -174,7 +174,7 @@ def main():
             samples_per_condition = int(run_sett["pde_solver"]["num_gen_samples"])  # N
             y_bars = u_lflr_samples[:num_models]
 
-            samples = sample_wan_guided(
+            samples = less_memory_sample_wan_guided(
                 diffusion_scheme,
                 denoise_fn,
                 y_bar=y_bars,

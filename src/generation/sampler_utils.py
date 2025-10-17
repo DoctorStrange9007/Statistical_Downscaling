@@ -56,6 +56,56 @@ def sample_unconditional(
     return generate(rng=rng_key, num_samples=num_samples)
 
 
+def less_memory_sample_wan_guided(
+    diffusion_scheme,
+    denoise_fn,
+    y_bar: jnp.ndarray,
+    rng_key: jax.Array,
+    num_samples: int,
+):
+    """WAN-style guided sampling with fixed chunking for lower memory.
+
+    Example: if `y_bar` has shape `(512, 48, 1)` and `splits=16`, this will
+    split into 16 chunks of `(32, 48, 1)`. For `num_samples=128`, each chunk
+    yields `(128, 32, d, 1)` (with `d` from settings), and the concatenated
+    result is `(128, 512, d, 1)`.
+
+    Returns `(num_samples, C, d, 1)` with `C=y_bar.shape[0]`.
+    """
+    splits = 16
+    total_conditions = int(y_bar.shape[0])
+    if total_conditions % splits != 0:
+        raise ValueError(
+            f"total conditions {total_conditions} must be divisible by splits {splits}"
+        )
+    batch_size = total_conditions // splits
+
+    # Reshape to (splits, batch_size, ...), preserving order
+    new_shape = (splits, batch_size) + tuple(y_bar.shape[1:])
+    y_bar_in_batches = jnp.reshape(y_bar, new_shape)
+
+    # Keys per split; vmap over both chunks and keys
+    keys = jax.random.split(rng_key, splits)
+
+    def run_one(chunk, key):
+        return sample_wan_guided(
+            diffusion_scheme,
+            denoise_fn,
+            y_bar=chunk,
+            rng_key=key,
+            num_samples=num_samples,
+        )  # (N, batch_size, d, 1)
+
+    per_chunk = jax.vmap(run_one)(y_bar_in_batches, keys)  # (splits, N, B, d, 1)
+
+    # Reassemble across condition chunks into (N, C, d, 1)
+    per_chunk = jnp.transpose(per_chunk, (1, 0, 2, 3, 4))  # (N, splits, B, d, 1)
+    combined = jnp.reshape(
+        per_chunk, (num_samples, total_conditions) + tuple(per_chunk.shape[3:])
+    )
+    return combined
+
+
 def sample_wan_guided(
     diffusion_scheme,
     denoise_fn,
@@ -80,6 +130,7 @@ def sample_wan_guided(
         independent draws (each with a different RNG) and the second axis
         indexes the `C` conditions in `y_bar`.
     """
+
     downsampling_factor = int(run_sett["general"]["d"]) // int(
         run_sett["general"]["d_prime"]
     )
