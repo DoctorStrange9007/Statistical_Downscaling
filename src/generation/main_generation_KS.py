@@ -27,12 +27,14 @@ from src.generation.utils_metrics import (
     calculate_constraint_rmse,
     calculate_sample_variability,
     calculate_melr,
+    calculate_kld,
 )
 from src.generation.data_utils import get_raw_datasets, get_ks_dataset
 from src.generation.sampler_utils import (
     sample_unconditional,
     less_memory_sample_wan_guided,
     sample_pde_guided,
+    sample_wan_guided,
 )
 
 parser = argparse.ArgumentParser()
@@ -43,7 +45,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = False
+USE_WANDB = True
 ALSO_TRAIN_PDE = False
 mode = "sample"
 
@@ -66,15 +68,14 @@ def main():
     diffusion_scheme = create_diffusion_scheme(DATA_STD)
 
     # Use env or defaults for project/entity; allow user override
-    os.environ.setdefault("WANDB_PROJECT", "statistical-downscaling-main-training")
+    project_name = "statistical-downscaling-main-" + mode
+    os.environ.setdefault("WANDB_PROJECT", project_name)
     os.environ.setdefault("WANDB_ENTITY", "jesse-hoekstra-university-of-oxford")
     use_wandb = bool(USE_WANDB)
     base_writer = metric_writers.create_default_writer(work_dir, asynchronous=False)
     writer = base_writer
     if use_wandb:
-        project = os.environ.get(
-            "WANDB_PROJECT", "statistical-downscaling-main-training"
-        )
+        project = os.environ.get("WANDB_PROJECT", project_name)
         run_name = os.environ.get("WANDB_NAME", os.path.basename(work_dir))
         entity = os.environ.get("WANDB_ENTITY")  # optional
         writer_name = run_name if mode == "train" else f"{run_name}-sample"
@@ -174,16 +175,65 @@ def main():
             samples_per_condition = int(run_sett["pde_solver"]["num_gen_samples"])  # N
             y_bars = u_lflr_samples[:num_models]
 
-            samples = less_memory_sample_wan_guided(
-                diffusion_scheme,
-                denoise_fn,
-                y_bar=y_bars,
-                rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
-                num_samples=samples_per_condition,
-            )
+            if int(run_sett["pde_solver"]["num_models"]) % 16 != 0:
+                samples = sample_wan_guided(
+                    diffusion_scheme,
+                    denoise_fn,
+                    y_bar=y_bars,
+                    rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
+                    num_samples=samples_per_condition,
+                )
+            else:
+                samples = less_memory_sample_wan_guided(
+                    diffusion_scheme,
+                    denoise_fn,
+                    y_bar=y_bars,
+                    rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
+                    num_samples=samples_per_condition,
+                )
             print(samples.std())
             print(samples.shape)
-            a = 2
+            constraint_rmse = calculate_constraint_rmse(
+                samples,
+                u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
+                C_prime,
+            )
+            kld = calculate_kld(
+                samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
+            )
+            sample_variability = calculate_sample_variability(samples)
+            melr_weighted = calculate_melr(
+                samples,
+                u_hfhr_samples,
+                sample_shape=(run_sett["general"]["d"],),
+                weighted=True,
+                epsilon=float(run_sett["epsilon"]),
+            )
+            melr_unweighted = calculate_melr(
+                samples,
+                u_hfhr_samples,
+                sample_shape=(run_sett["general"]["d"],),
+                weighted=False,
+                epsilon=float(run_sett["epsilon"]),
+            )
+
+            print(
+                "constraint_rmse: ",
+                constraint_rmse,
+                "sample_variability: ",
+                sample_variability,
+                "melr_unweighted: ",
+                melr_unweighted,
+                "melr_weighted: ",
+                melr_weighted,
+                "kld: ",
+                kld,
+            )
+            writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
+            writer.write_scalar("metrics/kld", float(kld))
+            writer.write_scalar("metrics/sample_variability", float(sample_variability))
+            writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
+            writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
         elif run_sett["option"] == "conditional":
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
@@ -208,9 +258,9 @@ def main():
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
                 C_prime,
             )
-            # kld = calculate_kld(
-            #    samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
-            # )
+            kld = calculate_kld(
+                samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
+            )
             sample_variability = calculate_sample_variability(samples)
             melr_weighted = calculate_melr(
                 samples,

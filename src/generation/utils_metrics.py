@@ -5,6 +5,16 @@ from jax.scipy.stats import gaussian_kde
 from jax.scipy.integrate import trapezoid
 import jax
 from functools import partial
+import argparse
+import yaml
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--config", type=str, default="src/generation/settings_generation.yaml"
+)
+args = parser.parse_args()
+with open(args.config, "r") as f:
+    run_sett = yaml.safe_load(f)
 
 
 def _single_calculate_constraint_rmse(
@@ -33,6 +43,7 @@ def calculate_constraint_rmse(
     C: jnp.ndarray,
 ) -> float:
     x = jnp.squeeze(predicted_samples, -1)
+    C = C.astype(jnp.float32)
     Cx = jnp.einsum("ncd,od->nco", x, C)
     predicted_samples_red_dim = Cx[..., None]
     vec_c = jax.vmap(_single_calculate_constraint_rmse, in_axes=(1, 0), out_axes=0)(
@@ -106,6 +117,27 @@ def _single_dimension_calculate_kld(
     # Extract the 1D marginal data for the current dimension
     pred_data = jnp.squeeze(predicted_samples)
     ref_data = jnp.squeeze(reference_samples)
+
+    # --- FIX 1: JITTER FOR ZERO VARIANCE --- the `y_bar entry values`` are all the same across samples, hence var=0 creating nan kld
+    # Check if variance is near-zero (which you confirmed is true)
+    pred_var = jnp.var(pred_data)
+    ref_var = jnp.var(ref_data)
+
+    # We create noise using a "dummy" key.
+    dummy_key = jax.random.PRNGKey(int(run_sett["rng_key"]))
+
+    # If variance is near-zero, add a tiny bit of noise
+    pred_data = jnp.where(
+        pred_var < epsilon,
+        pred_data + jax.random.normal(dummy_key, pred_data.shape) * 1e-6,
+        pred_data,
+    )
+    ref_data = jnp.where(
+        ref_var < epsilon,
+        ref_data + jax.random.normal(dummy_key, ref_data.shape) * 1e-6,
+        ref_data,
+    )
+    # --- END FIX 1 ---
 
     # Create Kernel Density Estimations for both distributions
     kde_pred = gaussian_kde(pred_data, bw_method="scott")
