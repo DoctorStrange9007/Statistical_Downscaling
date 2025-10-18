@@ -87,6 +87,7 @@ def less_memory_sample_wan_guided(
     # Keys per split; vmap over both chunks and keys
     keys = jax.random.split(rng_key, splits)
 
+    @jax.jit
     def run_one(chunk, key):
         return sample_wan_guided(
             diffusion_scheme,
@@ -96,7 +97,15 @@ def less_memory_sample_wan_guided(
             num_samples=num_samples,
         )  # (N, batch_size, d, 1)
 
-    per_chunk = jax.vmap(run_one)(y_bar_in_batches, keys)  # (splits, N, B, d, 1)
+    all_chunks = []
+    for i in range(
+        splits
+    ):  # cannot use vmap as double vmap is problem when running on server
+        chunk_result = run_one(y_bar_in_batches[i], keys[i])
+        all_chunks.append(chunk_result)
+
+    # Stack all results from the list
+    per_chunk = jnp.stack(all_chunks, axis=0)  # (splits, N, B, d, 1)
 
     # Reassemble across condition chunks into (N, C, d, 1)
     per_chunk = jnp.transpose(per_chunk, (1, 0, 2, 3, 4))  # (N, splits, B, d, 1)
