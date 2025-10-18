@@ -1,5 +1,5 @@
 output_dir: 'src/generation/output/'
-option: 'unconditional'
+option: 'wan_conditional'
 rng_key: 888
 epsilon: 1e-10
 general:
@@ -50,8 +50,8 @@ pde_solver:
   learning_rate: sirignano #set to specific value for fixed learning rate
   boundaries: [250] #[500, 1000, 2000, 3000, 4000, 4500]
   lambda: 0.65
-  num_gen_samples: 10
-  num_models: 2 # aka num_conditions 512
+  num_gen_samples: 128 
+  num_models: 512 # aka num_conditions 512
 DGM:
   nodes_per_layer: 50
   num_layers: 3

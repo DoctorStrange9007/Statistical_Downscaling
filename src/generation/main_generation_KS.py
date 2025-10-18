@@ -26,8 +26,8 @@ from src.generation.denoiser_utils import (
 from src.generation.utils_metrics import (
     calculate_constraint_rmse,
     calculate_sample_variability,
-    calculate_melr,
-    calculate_kld,
+    calculate_melr_pooled,
+    calculate_kld_pooled,
 )
 from src.generation.data_utils import get_raw_datasets, get_ks_dataset
 from src.generation.sampler_utils import (
@@ -198,18 +198,18 @@ def main():
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
                 C_prime,
             )
-            kld = calculate_kld(
+            kld = calculate_kld_pooled(
                 samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
             )
             sample_variability = calculate_sample_variability(samples)
-            melr_weighted = calculate_melr(
+            melr_weighted = calculate_melr_pooled(
                 samples,
                 u_hfhr_samples,
                 sample_shape=(run_sett["general"]["d"],),
                 weighted=True,
                 epsilon=float(run_sett["epsilon"]),
             )
-            melr_unweighted = calculate_melr(
+            melr_unweighted = calculate_melr_pooled(
                 samples,
                 u_hfhr_samples,
                 sample_shape=(run_sett["general"]["d"],),

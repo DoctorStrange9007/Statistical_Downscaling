@@ -43,7 +43,7 @@ def calculate_constraint_rmse(
     C: jnp.ndarray,
 ) -> float:
     x = jnp.squeeze(predicted_samples, -1)
-    C = C.astype(jnp.float32)
+    C = C.astype(jnp.float32)  # on external GPU
     Cx = jnp.einsum("ncd,od->nco", x, C)
     predicted_samples_red_dim = Cx[..., None]
     vec_c = jax.vmap(_single_calculate_constraint_rmse, in_axes=(1, 0), out_axes=0)(
@@ -118,27 +118,6 @@ def _single_dimension_calculate_kld(
     pred_data = jnp.squeeze(predicted_samples)
     ref_data = jnp.squeeze(reference_samples)
 
-    # --- FIX 1: JITTER FOR ZERO VARIANCE --- the `y_bar entry values`` are all the same across samples, hence var=0 creating nan kld
-    # Check if variance is near-zero (which you confirmed is true)
-    pred_var = jnp.var(pred_data)
-    ref_var = jnp.var(ref_data)
-
-    # We create noise using a "dummy" key.
-    dummy_key = jax.random.PRNGKey(int(run_sett["rng_key"]))
-
-    # If variance is near-zero, add a tiny bit of noise
-    pred_data = jnp.where(
-        pred_var < epsilon,
-        pred_data + jax.random.normal(dummy_key, pred_data.shape) * 1e-6,
-        pred_data,
-    )
-    ref_data = jnp.where(
-        ref_var < epsilon,
-        ref_data + jax.random.normal(dummy_key, ref_data.shape) * 1e-6,
-        ref_data,
-    )
-    # --- END FIX 1 ---
-
     # Create Kernel Density Estimations for both distributions
     kde_pred = gaussian_kde(pred_data, bw_method="scott")
     kde_ref = gaussian_kde(ref_data, bw_method="scott")
@@ -212,15 +191,19 @@ def _single_calculate_kld(
 
 
 @jax.jit
-def calculate_kld(
+def calculate_kld_pooled(
     predicted_samples: jnp.ndarray,
     reference_samples: jnp.ndarray,
     epsilon: float = 1e-10,
 ) -> float:
-    vec_c = jax.vmap(_single_calculate_kld, in_axes=(1, None, None), out_axes=0)(
-        predicted_samples, reference_samples, epsilon
+    num_pooled_samples = predicted_samples.shape[0] * predicted_samples.shape[1]
+    num_dimensions = predicted_samples.shape[2]
+    pooled_predicted_samples = jnp.reshape(
+        predicted_samples,
+        (num_pooled_samples, num_dimensions, predicted_samples.shape[3]),
     )
-    return jnp.mean(vec_c)
+    kld = _single_calculate_kld(pooled_predicted_samples, reference_samples, epsilon)
+    return kld
 
 
 @partial(jax.jit, static_argnames="sample_shape")
@@ -235,12 +218,13 @@ def _get_k_grids(sample_shape: tuple):
     return k_magnitude, k_bins
 
 
-# 2. Write a function that processes ONE single sample. This is the innermost block.
 def _get_energy_spectrum_for_one_sample(
-    sample: jnp.ndarray, sample_shape: tuple
+    sample: jnp.ndarray,
+    sample_shape: tuple,
+    k_magnitude: jnp.ndarray,
+    k_bins: jnp.ndarray,
 ) -> jnp.ndarray:
     """Helper function to compute the energy spectrum for a single flattened sample."""
-    k_magnitude, k_bins = _get_k_grids(sample_shape)
     sample_reshaped = sample.reshape(sample_shape)
 
     fft_coeffs = jnp.fft.fftn(sample_reshaped)
@@ -254,20 +238,34 @@ def _get_energy_spectrum_for_one_sample(
     return jnp.where(counts > 0, energy_spectrum / counts, 0.0)
 
 
-def _melr_for_one_condition(
-    predicted_for_one_condition: jnp.ndarray,  # Shape: (N, D) e.g., (10, 192)
-    all_references: jnp.ndarray,  # Shape: (M, D) e.g., (163840, 192)
+@partial(jax.jit, static_argnames=["sample_shape", "weighted"])
+def calculate_melr_pooled(
+    predicted_samples: jnp.ndarray,  # Shape: (N, C, D, 1) e.g., (10, 2, 192, 1)
+    reference_samples: jnp.ndarray,  # Shape: (M, D, 1) e.g., (163840, 192, 1)
     sample_shape: tuple,
     weighted: bool,
-    epsilon: float,
+    epsilon: float = 1e-10,
 ) -> jnp.ndarray:
-    """INNER MAP: Calculates MELR for one batch of N samples vs M reference samples."""
+    """
+    Calculates average MELR by vmapping over the C-axis (conditions).
+    """
+    num_pooled_samples = predicted_samples.shape[0] * predicted_samples.shape[1]
+    num_dimensions = predicted_samples.shape[2]
+    pooled_predicted_samples = jnp.reshape(
+        predicted_samples,
+        (num_pooled_samples, num_dimensions, predicted_samples.shape[3]),
+    )
+
+    pred_clean = jnp.squeeze(pooled_predicted_samples, axis=-1)  # Shape: (N*C, D)
+    ref_clean = jnp.squeeze(reference_samples, axis=-1)  # Shape: (M, D)
+
+    k_magnitude, k_bins = _get_k_grids(sample_shape)
 
     vmapped_spectrum_fn = jax.vmap(
-        _get_energy_spectrum_for_one_sample, in_axes=(0, None)
+        _get_energy_spectrum_for_one_sample, in_axes=(0, None, None, None)
     )
-    E_pred_batch = vmapped_spectrum_fn(predicted_for_one_condition, sample_shape)
-    E_ref_batch = vmapped_spectrum_fn(all_references, sample_shape)
+    E_pred_batch = vmapped_spectrum_fn(pred_clean, sample_shape, k_magnitude, k_bins)
+    E_ref_batch = vmapped_spectrum_fn(ref_clean, sample_shape, k_magnitude, k_bins)
 
     E_pred = jnp.mean(E_pred_batch, axis=0)
     E_ref = jnp.mean(E_ref_batch, axis=0)
@@ -287,24 +285,3 @@ def _melr_for_one_condition(
         return jnp.mean(log_ratios)
 
     return jax.lax.cond(weighted, weighted_calc, unweighted_calc)
-
-
-@partial(jax.jit, static_argnames=["sample_shape", "weighted"])
-def calculate_melr(
-    predicted_samples: jnp.ndarray,  # Shape: (N, C, D, 1) e.g., (10, 2, 192, 1)
-    reference_samples: jnp.ndarray,  # Shape: (M, D, 1) e.g., (163840, 192, 1)
-    sample_shape: tuple,
-    weighted: bool,
-    epsilon: float = 1e-10,
-) -> jnp.ndarray:
-    """
-    Calculates average MELR by vmapping over the C-axis (conditions).
-    """
-    pred_clean = jnp.squeeze(predicted_samples, axis=-1)  # Shape: (N, C, D)
-    ref_clean = jnp.squeeze(reference_samples, axis=-1)  # Shape: (M, D)
-
-    melrs_per_condition = jax.vmap(
-        _melr_for_one_condition, in_axes=(1, None, None, None, None)
-    )(pred_clean, ref_clean, sample_shape, weighted, epsilon)
-
-    return jnp.mean(melrs_per_condition)
