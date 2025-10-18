@@ -261,18 +261,18 @@ def main():
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
                 C_prime,
             )
-            kld = calculate_kld(
+            kld = calculate_kld_pooled(
                 samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
             )
             sample_variability = calculate_sample_variability(samples)
-            melr_weighted = calculate_melr(
+            melr_weighted = calculate_melr_pooled(
                 samples,
                 u_hfhr_samples,
                 sample_shape=(run_sett["general"]["d"],),
                 weighted=True,
                 epsilon=float(run_sett["epsilon"]),
             )
-            melr_unweighted = calculate_melr(
+            melr_unweighted = calculate_melr_pooled(
                 samples,
                 u_hfhr_samples,
                 sample_shape=(run_sett["general"]["d"],),
