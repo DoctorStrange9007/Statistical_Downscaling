@@ -41,15 +41,15 @@ exp_tspan:
   end_sigma: 1e-2 #not defined specifically in the paper
 pde_solver:
   t_low: 1e-10
-  nSim_interior: 2000
-  nSim_terminal: 2000 #50000
-  x_low: 2.0 #change to fit data range
-  x_high: 8.0
-  sampling_stages: 3 #1500 
-  steps_per_sample: 1 #100 DOES THIS ADD VALUE? HOW MUCH? 
+  nSim_interior: 1000 #Batch size
+  nSim_terminal: 1000 #Batch size
+  x_low: 0.0 
+  x_high: 64.0
+  sampling_stages: 100_000 #100_000 
+  steps_per_sample: 1 #can remove this it seems 
   learning_rate: sirignano #set to specific value for fixed learning rate
-  boundaries: [250] #[500, 1000, 2000, 3000, 4000, 4500]
-  lambda: 0.65
+  boundaries: [5000, 10000, 20000, 30000, 40000, 45000]
+  lambda: 1 #to start with
   num_gen_samples: 128 
   num_models: 512 # aka num_conditions 512
 DGM:

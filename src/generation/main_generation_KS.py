@@ -45,9 +45,10 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = False
-ALSO_TRAIN_PDE = False
-mode = "sample"
+USE_WANDB = True
+TRAIN_DENOISER = False
+TRAIN_PDE = True
+mode = "train"
 
 
 def main():
@@ -89,42 +90,44 @@ def main():
         )
 
     def log_fn(payload: dict):
-        try:
+        if hasattr(writer, "log"):
+            writer.log(payload)
+        else:
             writer.write_scalars(scalars=payload)
-        except Exception:
-            pass
 
     if mode == "train":
         print("Running in training mode…")
-        model = build_model(denoiser_model, diffusion_scheme, DATA_STD)
-        trainer = build_trainer(model)
+        if TRAIN_DENOISER:
+            model = build_model(denoiser_model, diffusion_scheme, DATA_STD)
+            trainer = build_trainer(model)
 
-        run_training(
-            train_dataloader=get_ks_dataset(
-                u_hfhr_samples,
-                split="train[:75%]",
-                batch_size=run_sett["general"]["batch_size"],
-                seed=int(run_sett["rng_key"]),
-            ),
-            trainer=trainer,
-            workdir=work_dir,
-            total_train_steps=run_sett["general"]["total_train_steps"],
-            metric_writer=writer,
-            metric_aggregation_steps=run_sett["general"]["metric_aggregation_steps"],
-            eval_dataloader=get_ks_dataset(
-                u_hfhr_samples,
-                split="train[75%:]",
-                batch_size=run_sett["general"]["batch_size"],
-                seed=int(run_sett["rng_key"]),
-            ),
-            eval_every_steps=run_sett["general"]["eval_every_steps"],
-            num_batches_per_eval=run_sett["general"]["num_batches_per_eval"],
-            save_interval_steps=run_sett["general"]["save_interval_steps"],
-            max_to_keep=run_sett["general"]["max_to_keep"],
-        )
-
-        denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
-        if ALSO_TRAIN_PDE:
+            run_training(
+                train_dataloader=get_ks_dataset(
+                    u_hfhr_samples,
+                    split="train[:75%]",
+                    batch_size=run_sett["general"]["batch_size"],
+                    seed=int(run_sett["rng_key"]),
+                ),
+                trainer=trainer,
+                workdir=work_dir,
+                total_train_steps=run_sett["general"]["total_train_steps"],
+                metric_writer=writer,
+                metric_aggregation_steps=run_sett["general"][
+                    "metric_aggregation_steps"
+                ],
+                eval_dataloader=get_ks_dataset(
+                    u_hfhr_samples,
+                    split="train[75%:]",
+                    batch_size=run_sett["general"]["batch_size"],
+                    seed=int(run_sett["rng_key"]),
+                ),
+                eval_every_steps=run_sett["general"]["eval_every_steps"],
+                num_batches_per_eval=run_sett["general"]["num_batches_per_eval"],
+                save_interval_steps=run_sett["general"]["save_interval_steps"],
+                max_to_keep=run_sett["general"]["max_to_keep"],
+            )
+        if TRAIN_PDE:
+            denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
                 y_bar=u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
@@ -134,11 +137,7 @@ def main():
                 rng_key=jax.random.PRNGKey(int(run_sett["rng_key"])),
             )
 
-            lambda_value = (
-                jnp.float32(run_sett["pde_solver"]["lambda"])
-                if "lambda" in run_sett.get("pde_solver", {})
-                else None
-            )
+            lambda_value = jnp.float32(run_sett["pde_solver"]["lambda"])
 
             pde_solver.train(
                 log_fn=(lambda payload: log_fn({**payload, "lambda": lambda_value}))

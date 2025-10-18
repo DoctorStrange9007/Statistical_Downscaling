@@ -2,15 +2,10 @@
 
 This module provides `WandbWriter`, a thin wrapper that forwards writes to a
 base metric writer (e.g., `clu.metric_writers.MultiWriter`) while also logging
-to W&B when available and enabled.
+to W&B.
 """
 
-import os
-
-try:
-    import wandb  # type: ignore
-except Exception:
-    wandb = None  # type: ignore
+import wandb  # type: ignore
 
 
 class WandbWriter:
@@ -41,21 +36,14 @@ class WandbWriter:
         """
         self.base_writer = base_writer
         self._step = 0
-        self._active = bool(
-            active and (wandb is not None) and not os.environ.get("WANDB_DISABLED")
+        # Initialize a W&B run immediately; assume W&B is available.
+        self._run = wandb.init(
+            project=project,
+            name=name,
+            entity=entity,
+            config=config or {},
+            reinit=True,
         )
-        self._run = None
-        if self._active:
-            try:
-                self._run = wandb.init(
-                    project=project,
-                    name=name,
-                    entity=entity,
-                    config=config or {},
-                    reinit=True,
-                )
-            except Exception:
-                self._active = False
 
     def __getattr__(self, item):
         """Proxy unknown attributes to the underlying base writer."""
@@ -82,55 +70,70 @@ class WandbWriter:
             elif len(args) >= 2:
                 step = args[0]
                 scalars = args[1]
+        if not scalars:
+            return
+        # Allow callers to provide step inside the payload; remove it from metrics
+        step_was_provided = step is not None
+        if not step_was_provided and isinstance(scalars, dict) and ("step" in scalars):
+            step = int(scalars.pop("step"))
+            step_was_provided = True
         if step is None:
             step = self._step
 
-        self.base_writer.write_scalars(step=step, scalars=scalars)
+        # Simple sanitation: drop None and coerce to Python floats
+        sanitized = {}
+        for k, v in dict(scalars).items():
+            if v is None:
+                continue
+            try:
+                if hasattr(v, "item"):
+                    v = v.item()
+                sanitized[k] = float(v)
+            except Exception:
+                # Skip non-convertible values
+                continue
+        if not sanitized:
+            return
 
-        if self._active and scalars and (wandb is not None):
-            # Ensure W&B uses the provided/global step rather than auto-incrementing
-            wandb.log(dict(scalars), step=step)
+        # Forward to base writer
+        self.base_writer.write_scalars(step=step, scalars=sanitized)
+
+        # Mirror to W&B
+        wandb.log(dict(sanitized), step=step)
+
+        # Advance step only when caller didn't explicitly provide a step
+        if not step_was_provided and step >= self._step:
+            self._step = step + 1
+
+    def log(self, payload: dict):
+        """Convenience: accept a plain dict of scalars and log it."""
+        self.write_scalars(scalars=payload)
 
     def write_scalar(self, name: str, value):
         """Convenience: write a single scalar by name.
 
         This avoids step management and mirrors directly to W&B when active.
         """
-        if self._active and (wandb is not None):
-            # Keep W&B step aligned with our tracked step
-            wandb.log({name: value}, step=self._step)
+        # Keep W&B step aligned with our tracked step
+        wandb.log({name: value}, step=self._step)
 
     def write_hparams(self, hparams):
         """Write hyperparameters to the base writer and W&B config."""
-        try:
-            if hasattr(self.base_writer, "write_hparams"):
-                self.base_writer.write_hparams(hparams)
-        except Exception:
-            pass
-        if self._active and hparams and (wandb is not None):
-            try:
-                wandb.config.update(dict(hparams), allow_val_change=True)
-            except Exception:
-                pass
+        if hasattr(self.base_writer, "write_hparams"):
+            self.base_writer.write_hparams(hparams)
+        if hparams:
+            wandb.config.update(dict(hparams), allow_val_change=True)
 
     def write_images(self, *args, **kwargs):
         """Write images via base writer and mirror to W&B if active.
 
         Expects keyword argument `images` as a mapping from name to image array.
         """
-        try:
-            if hasattr(self.base_writer, "write_images"):
-                self.base_writer.write_images(*args, **kwargs)
-        except Exception:
-            pass
+        if hasattr(self.base_writer, "write_images"):
+            self.base_writer.write_images(*args, **kwargs)
         images = kwargs.get("images")
-        if self._active and images and (wandb is not None):
-            try:
-                wandb.log(
-                    {k: wandb.Image(v) for k, v in images.items()}, step=self._step
-                )
-            except Exception:
-                pass
+        if images:
+            wandb.log({k: wandb.Image(v) for k, v in images.items()}, step=self._step)
 
     def flush(self):
         """Flush the base writer buffers if supported."""
@@ -141,5 +144,4 @@ class WandbWriter:
         """Close the base writer and finish the W&B run if active."""
         if hasattr(self.base_writer, "close"):
             self.base_writer.close()
-        if self._active and (wandb is not None):
-            wandb.finish()
+        wandb.finish()

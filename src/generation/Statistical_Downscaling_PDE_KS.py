@@ -61,9 +61,20 @@ class KSStatisticalDownscalingPDESolver(PDE_solver):
         """
         super().__init__(settings=settings, rng_key=rng_key)
 
-        self.C_prime = jnp.array(
-            [[1 if j == 4 * i else 0 for j in range(192)] for i in range(48)]
+        self.downsampling_factor = int(settings["general"]["d"]) // int(
+            settings["general"]["d_prime"]
         )
+        self.C_prime = jnp.array(
+            [
+                [
+                    1 if j == self.downsampling_factor * i else 0
+                    for j in range(int(settings["general"]["d"]))
+                ]
+                for i in range(int(settings["general"]["d_prime"]))
+            ]
+        ).astype(
+            jnp.float32
+        )  # on external GPU
         self.y_bar = jnp.asarray(y_bar)
         self.scheme = scheme
         self.denoise_fn = denoise_fn

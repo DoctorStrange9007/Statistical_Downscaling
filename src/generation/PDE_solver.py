@@ -65,12 +65,12 @@ class PDE_solver:
             boundaries = settings["pde_solver"]["boundaries"]
             schedules = [
                 optax.constant_schedule(1e-4),
-                # optax.constant_schedule(5e-4),
+                optax.constant_schedule(5e-4),
                 optax.constant_schedule(1e-5),
-                # optax.constant_schedule(5e-6),
-                # optax.constant_schedule(1e-6),
-                # optax.constant_schedule(5e-7),
-                # optax.constant_schedule(1e-7),
+                optax.constant_schedule(5e-6),
+                optax.constant_schedule(1e-6),
+                optax.constant_schedule(5e-7),
+                optax.constant_schedule(1e-7),
             ]
             self.learning_rate = optax.join_schedules(
                 schedules=schedules, boundaries=boundaries
@@ -184,18 +184,14 @@ class PDE_solver:
                 print(
                     f"Stage {i} [model {k}]: Loss = {float(tot):.6f}, L1 = {float(L1):.6f}, L3 = {float(L3):.6f}"
                 )
-                if log_fn is not None:
-                    try:
-                        # Log per-model series under distinct metric names
-                        log_fn(
-                            {
-                                f"pde_solver/model_{k}/loss_total": float(tot),
-                                f"pde_solver/model_{k}/loss_PDE": float(L1),
-                                f"pde_solver/model_{k}/loss_terminal": float(L3),
-                            }
-                        )
-                    except Exception:
-                        pass
+                log_fn(
+                    {
+                        "step": int(i),
+                        f"pde_solver/model_{k}/loss_total": float(tot),
+                        f"pde_solver/model_{k}/loss_PDE": float(L1),
+                        f"pde_solver/model_{k}/loss_terminal": float(L3),
+                    }
+                )
 
     @partial(jax.jit, static_argnums=0)
     def grad_log_h_params(
