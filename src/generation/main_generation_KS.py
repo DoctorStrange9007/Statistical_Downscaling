@@ -45,7 +45,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = True
+USE_WANDB = False
 ALSO_TRAIN_PDE = False
 mode = "sample"
 
@@ -147,6 +147,9 @@ def main():
             pde_solver.save_params(pde_params_dir)
 
     elif mode == "sample":
+        jax.config.update(
+            "jax_enable_x64", True
+        )  # while the generation of the data was performed in double precision (fp64)
         print("Running in sampling-only mode…")
         downsampling_factor = int(run_sett["general"]["d"]) // int(
             run_sett["general"]["d_prime"]
