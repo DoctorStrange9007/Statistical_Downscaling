@@ -218,9 +218,17 @@ def sample_pde_guided(
         return_full_paths=False,
     )
 
+    # no vmap but lax.scan (jit compatible for loop) to save memory
     keys = jax.random.split(rng_key, samples_per_condition)
-    generate = jax.jit(sampler.generate, static_argnames=("num_samples",))
-    batched_generate = jax.jit(
-        jax.vmap(lambda k: generate(rng=k, num_samples=pde_solver.num_models))
+    generate_one_batch = jax.jit(
+        lambda k: sampler.generate(rng=k, num_samples=pde_solver.num_models)
     )
-    return batched_generate(keys)
+
+    # scan requires a carry argument, simply input None
+    def loop_body(carry, key):
+        samples = generate_one_batch(key)
+        return carry, samples
+
+    _, all_samples = jax.lax.scan(loop_body, init=None, xs=keys)
+
+    return all_samples
