@@ -47,7 +47,8 @@ with open(args.config, "r") as f:
 
 USE_WANDB = True
 TRAIN_DENOISER = False
-TRAIN_PDE = True
+TRAIN_PDE = False
+CONTINUE_TRAINING = True
 mode = "train"
 
 
@@ -144,7 +145,24 @@ def main():
             )
             pde_params_dir = os.path.join(work_dir, "pde_params")
             pde_solver.save_params(pde_params_dir)
-
+        if CONTINUE_TRAINING:
+            denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
+            pde_solver = KSStatisticalDownscalingPDESolver(
+                samples=u_hfhr_samples,
+                y_bar=u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
+                settings=run_sett,
+                denoise_fn=denoise_fn,
+                scheme=diffusion_scheme,
+                rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
+            )
+            pde_params_dir = os.path.join(work_dir, "pde_params")
+            pde_solver.load_params(pde_params_dir)
+            lambda_value = jnp.float32(run_sett["pde_solver"]["lambda"])
+            pde_solver.train(
+                log_fn=(lambda payload: log_fn({**payload, "lambda": lambda_value}))
+            )
+            pde_params_dir = os.path.join(work_dir, "pde_params_continued")
+            pde_solver.save_params(pde_params_dir)
     elif mode == "sample":
         jax.config.update(
             "jax_enable_x64", True
@@ -254,7 +272,8 @@ def main():
                 rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
                 samples_per_condition=int(run_sett["pde_solver"]["num_gen_samples"]),
             )
-            print(jnp.mean(samples))
+            print(samples.std())
+            print(samples.shape)
             constraint_rmse = calculate_constraint_rmse(
                 samples,
                 u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
@@ -279,12 +298,23 @@ def main():
                 epsilon=float(run_sett["epsilon"]),
             )
 
-            print(constraint_rmse, sample_variability, melr_weighted, melr_unweighted)
-            # writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
-            # writer.write_scalar("metrics/kld", float(kld))
-            # writer.write_scalar("metrics/sample_variability", float(sample_variability))
-            # writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
-            # writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
+            print(
+                "constraint_rmse: ",
+                constraint_rmse,
+                "sample_variability: ",
+                sample_variability,
+                "melr_unweighted: ",
+                melr_unweighted,
+                "melr_weighted: ",
+                melr_weighted,
+                "kld: ",
+                kld,
+            )
+            writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
+            writer.write_scalar("metrics/kld", float(kld))
+            writer.write_scalar("metrics/sample_variability", float(sample_variability))
+            writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
+            writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
 
     # Flush/close the writer once
     try:

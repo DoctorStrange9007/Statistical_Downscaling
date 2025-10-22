@@ -294,8 +294,36 @@ class PDE_solver:
         Returns True if loaded successfully, else False.
         """
         try:
+            if not hasattr(self, "params_list") or not hasattr(self, "opt_state_list"):
+                print("Error: Solver must be initialized before loading checkpoint.")
+                print("       (self.params_list and self.opt_state_list must exist)")
+                return False
+
+            target_item = {
+                "params_list": self.params_list,
+                "opt_state_list": self.opt_state_list,
+            }
+
             checkpointer = ocp.PyTreeCheckpointer()
-            # Restore directly from the specified directory.
+            restored = checkpointer.restore(ckpt_dir, item=target_item)
+
+            if restored:
+                self.params_list = restored["params_list"]
+                self.opt_state_list = restored["opt_state_list"]
+                print(f"Solver state loaded successfully from: {ckpt_dir}")
+                return True
+            else:
+                print(f"Failed to find or restore checkpoint from: {ckpt_dir}")
+                return False
+
+        except Exception as e:
+            print(f"Failed to load solver state from {ckpt_dir}. Error: {e}")
+            return False
+
+    def load_params_old(self, ckpt_dir: str) -> bool:
+        """CAN DELETE LATER BUT CURRENT SAMPLE RESULTS BASED ON THIS VERSION"""
+        try:
+            checkpointer = ocp.PyTreeCheckpointer()
             restored = checkpointer.restore(ckpt_dir)
 
             if restored and "params_list" in restored and "opt_state_list" in restored:
@@ -309,6 +337,5 @@ class PDE_solver:
                 return False
 
         except Exception as e:
-            # Provide more information if loading fails.
             print(f"Failed to load solver state from {ckpt_dir}. Error: {e}")
             return False
