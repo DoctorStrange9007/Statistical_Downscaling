@@ -48,7 +48,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = False
+USE_WANDB = True
 TRAIN_DENOISER = False
 TRAIN_PDE = False
 CONTINUE_TRAINING = False
@@ -253,6 +253,7 @@ def main():
             print(samples.shape)
             save_samples_h5(sample_file, samples)
     elif mode == "eval":
+        jax.config.update("jax_enable_x64", True)
         downsampling_factor = int(run_sett["general"]["d"]) // int(
             run_sett["general"]["d_prime"]
         )
