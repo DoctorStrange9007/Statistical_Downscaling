@@ -55,27 +55,11 @@ mode = "eval"
 
 
 def save_samples_h5(path, samples, *, y_bar=None, run_settings=None, rng_key=None):
-    """Save samples and optional metadata to an HDF5 file (N,C,d,1)."""
+    """Save only the samples to an HDF5 file as dataset 'samples'."""
     arr = np.asarray(samples, dtype=np.float32)
-    if arr.ndim == 4:
-        chunks = (min(arr.shape[0], 16), min(arr.shape[1], 64), arr.shape[2], 1)
-    else:
-        chunks = True
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
-        f.create_dataset(
-            "samples", data=arr, compression="gzip", compression_opts=4, chunks=chunks
-        )
-        f.attrs["axes"] = "N,C,d,channel"
-        if y_bar is not None:
-            f.create_dataset("y_bar", data=np.asarray(y_bar))
-        if rng_key is not None:
-            f.create_dataset("rng_key", data=np.asarray(rng_key, dtype=np.uint32))
-        if run_settings is not None:
-            yaml_bytes = yaml.safe_dump(run_settings).encode("utf-8")
-            f.create_dataset(
-                "config_yaml", data=np.frombuffer(yaml_bytes, dtype=np.uint8)
-            )
+        f.create_dataset("samples", data=arr)
 
 
 def load_samples_h5(path, *, as_jax=True):
@@ -221,12 +205,7 @@ def main():
             )
             print(jnp.mean(samples))
             print(samples.std())
-            save_samples_h5(
-                sample_file,
-                samples,
-                run_settings=run_sett,
-                rng_key=run_sett["rng_key"],
-            )
+            save_samples_h5(sample_file, samples)
         elif run_sett["option"] == "wan_conditional":
             num_models = int(run_sett["pde_solver"]["num_models"])  # C
             samples_per_condition = int(run_sett["pde_solver"]["num_gen_samples"])  # N
@@ -250,13 +229,7 @@ def main():
                 )
             print(samples.std())
             print(samples.shape)
-            save_samples_h5(
-                sample_file,
-                samples,
-                y_bar=y_bars,
-                run_settings=run_sett,
-                rng_key=run_sett["rng_key"],
-            )
+            save_samples_h5(sample_file, samples)
         elif run_sett["option"] == "conditional":
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
@@ -277,15 +250,7 @@ def main():
             )
             print(samples.std())
             print(samples.shape)
-            num_models = int(run_sett["pde_solver"]["num_models"])
-            y_bars = u_lflr_samples[:num_models]
-            save_samples_h5(
-                sample_file,
-                samples,
-                y_bar=y_bars,
-                run_settings=run_sett,
-                rng_key=run_sett["rng_key"],
-            )
+            save_samples_h5(sample_file, samples)
     elif mode == "eval":
         downsampling_factor = int(run_sett["general"]["d"]) // int(
             run_sett["general"]["d_prime"]
