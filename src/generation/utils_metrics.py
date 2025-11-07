@@ -285,3 +285,130 @@ def calculate_melr_pooled(
         return jnp.mean(log_ratios)
 
     return jax.lax.cond(weighted, weighted_calc, unweighted_calc)
+
+
+def _single_dimension_calculate_wass1(
+    predicted_samples_1d: jnp.ndarray,
+    reference_samples_1d: jnp.ndarray,
+    num_bins: int = 1000,
+) -> float:
+    """
+    Calculates the Wasserstein-1 metric for a single dimension using empirical CDFs.
+
+    The integral is approximated over the fixed range [-20, 20] as specified.
+    """
+    # Define the integration range and bins
+    integration_range = [
+        -20.0,
+        20.0,
+    ]  # this can be changed to the range of the data!!! I think also sufficient for KS
+    bins = jnp.linspace(integration_range[0], integration_range[1], num_bins + 1)
+
+    # Ensure data is 1D for histogram
+    pred_data = jnp.squeeze(predicted_samples_1d)
+    ref_data = jnp.squeeze(reference_samples_1d)
+
+    # Compute histograms (empirical PDFs)
+    counts_pred, _ = jnp.histogram(pred_data, bins=bins, range=integration_range)
+    counts_ref, _ = jnp.histogram(ref_data, bins=bins, range=integration_range)
+
+    # Compute empirical CDFs. Add epsilon for numerical stability if sum is zero.
+    total_pred = jnp.sum(counts_pred)
+    total_ref = jnp.sum(counts_ref)
+
+    cdf_pred = jnp.cumsum(counts_pred) / (total_pred + 1e-10)
+    cdf_ref = jnp.cumsum(counts_ref) / (total_ref + 1e-10)
+
+    # Calculate the absolute difference between CDFs
+    cdf_diff = jnp.abs(cdf_pred - cdf_ref)
+
+    # Get bin centers for trapezoidal integration
+    # The CDF values correspond to the probability mass *within* each bin
+    bin_centers = (bins[:-1] + bins[1:]) / 2.0
+
+    # Approximate the integral using the trapezoidal rule
+    # This is equivalent to sum(|CDF_pred - CDF_ref| * dz)
+    wass1_m = trapezoid(cdf_diff, x=bin_centers)
+
+    return wass1_m
+
+
+@partial(jax.jit, static_argnames="num_bins")
+def _single_calculate_wass1(
+    predicted_samples: jnp.ndarray,
+    reference_samples: jnp.ndarray,
+    num_bins: int = 1000,
+) -> float:
+    """
+    Calculates the aggregated Wasserstein-1 metric (Wass1) as defined in Eq. 38.
+
+    It computes the Wass1 metric for the 1D marginal distributions of each
+    dimension and averages them.
+
+    The formula is:
+    Wass1 = (1/d) * sum_{m=1 to d} integral( |CDF_pred,m(z) - CDF_ref,m(z)| dz )
+
+    Args:
+        predicted_samples (jnp.ndarray): Array of shape (N, d, 1),
+            representing the generated samples.
+        reference_samples (jnp.ndarray): Array of shape (M, d, 1),
+            representing the reference samples. N can be different from M.
+        num_bins (int): The number of bins to use for the empirical CDF
+            and integration. Must be static for JIT.
+
+    Returns:
+        float: The mean Wass1 metric over all dimensions.
+    """
+    if predicted_samples.shape[1] != reference_samples.shape[1]:
+        raise ValueError(
+            "Predicted and reference samples must have the same number of dimensions (columns)."
+        )
+    if predicted_samples.shape[2] != 1 or reference_samples.shape[2] != 1:
+        raise ValueError(
+            f"Expected trailing dimension of 1, but got {predicted_samples.shape} and {reference_samples.shape}"
+        )
+
+    # Vectorize the 1D calculation over all dimensions (axis=1)
+    # in_axes=(1, 1, None) maps over dimension 'd' for both samples
+    # and passes the static 'num_bins' argument
+    wass1_vec = jax.vmap(
+        _single_dimension_calculate_wass1, in_axes=(1, 1, None), out_axes=0
+    )(predicted_samples, reference_samples, num_bins)
+
+    # Average the Wass1 metric across all dimensions
+    mean_wass1 = jnp.mean(wass1_vec)
+
+    return mean_wass1
+
+
+@partial(jax.jit, static_argnames="num_bins")
+def calculate_wass1_pooled(
+    predicted_samples: jnp.ndarray,
+    reference_samples: jnp.ndarray,
+    num_bins: int = 1000,
+) -> float:
+    """
+    JIT-compiled entry point for pooled Wass1 calculation.
+
+    Pools the batch and condition axes of predicted_samples before metric calculation.
+
+    Args:
+        predicted_samples (jnp.ndarray): Shape (N, C, D, 1)
+        reference_samples (jnp.ndarray): Shape (M, D, 1)
+        num_bins (int): Number of bins for histogram.
+
+    Returns:
+        float: The mean Wass1 metric.
+    """
+    # Pool the N (batch) and C (condition) axes
+    num_pooled_samples = predicted_samples.shape[0] * predicted_samples.shape[1]
+    num_dimensions = predicted_samples.shape[2]
+    pooled_predicted_samples = jnp.reshape(
+        predicted_samples,
+        (num_pooled_samples, num_dimensions, predicted_samples.shape[3]),
+    )
+
+    wass1 = _single_calculate_wass1(
+        pooled_predicted_samples, reference_samples, num_bins
+    )
+    return wass1

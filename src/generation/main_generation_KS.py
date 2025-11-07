@@ -30,6 +30,7 @@ from src.generation.utils_metrics import (
     calculate_sample_variability,
     calculate_melr_pooled,
     calculate_kld_pooled,
+    calculate_wass1_pooled,
 )
 from src.generation.data_utils import get_raw_datasets, get_ks_dataset
 from src.generation.sampler_utils import (
@@ -292,6 +293,12 @@ def main():
             epsilon=float(run_sett["epsilon"]),
         )
 
+        wass1 = calculate_wass1_pooled(
+            samples,
+            u_hfhr_samples,
+            num_bins=1000,
+        )
+
         print(
             "constraint_rmse: ",
             constraint_rmse,
@@ -303,6 +310,8 @@ def main():
             melr_weighted,
             "kld: ",
             kld,
+            "wass1: ",
+            wass1,
         )
         if use_wandb:
             writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
