@@ -5,6 +5,8 @@ import sys
 import jax
 
 import jax.numpy as jnp
+import numpy as np
+import h5py
 from clu import metric_writers
 import yaml
 import argparse
@@ -45,11 +47,42 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = True
+USE_WANDB = False
 TRAIN_DENOISER = False
 TRAIN_PDE = False
-CONTINUE_TRAINING = True
-mode = "train"
+CONTINUE_TRAINING = False
+mode = "eval"
+
+
+def save_samples_h5(path, samples, *, y_bar=None, run_settings=None, rng_key=None):
+    """Save samples and optional metadata to an HDF5 file (N,C,d,1)."""
+    arr = np.asarray(samples, dtype=np.float32)
+    if arr.ndim == 4:
+        chunks = (min(arr.shape[0], 16), min(arr.shape[1], 64), arr.shape[2], 1)
+    else:
+        chunks = True
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with h5py.File(path, "w") as f:
+        f.create_dataset(
+            "samples", data=arr, compression="gzip", compression_opts=4, chunks=chunks
+        )
+        f.attrs["axes"] = "N,C,d,channel"
+        if y_bar is not None:
+            f.create_dataset("y_bar", data=np.asarray(y_bar))
+        if rng_key is not None:
+            f.create_dataset("rng_key", data=np.asarray(rng_key, dtype=np.uint32))
+        if run_settings is not None:
+            yaml_bytes = yaml.safe_dump(run_settings).encode("utf-8")
+            f.create_dataset(
+                "config_yaml", data=np.frombuffer(yaml_bytes, dtype=np.uint8)
+            )
+
+
+def load_samples_h5(path, *, as_jax=True):
+    """Load samples from an HDF5 file and return a JAX array by default."""
+    with h5py.File(path, "r") as f:
+        samples_np = f["samples"][()]
+    return jnp.asarray(samples_np) if as_jax else samples_np
 
 
 def main():
@@ -80,7 +113,12 @@ def main():
         project = os.environ.get("WANDB_PROJECT", project_name)
         run_name = os.environ.get("WANDB_NAME", os.path.basename(work_dir))
         entity = os.environ.get("WANDB_ENTITY")  # optional
-        writer_name = run_name if mode == "train" else f"{run_name}-sample"
+        if mode == "train":
+            writer_name = run_name
+        elif mode == "sample":
+            writer_name = f"{run_name}-sample"
+        else:
+            writer_name = f"{run_name}-eval"
         writer = WandbWriter(
             base_writer,
             project=project,
@@ -91,10 +129,13 @@ def main():
         )
 
     def log_fn(payload: dict):
-        if hasattr(writer, "log"):
-            writer.log(payload)
-        else:
-            writer.write_scalars(scalars=payload)
+        step = int(payload.get("step", 0)) if isinstance(payload, dict) else 0
+        metrics = (
+            {k: v for k, v in payload.items() if k != "step"}
+            if isinstance(payload, dict)
+            else payload
+        )
+        writer.write_scalars(step=step, scalars=metrics)
 
     if mode == "train":
         print("Running in training mode…")
@@ -155,32 +196,22 @@ def main():
                 scheme=diffusion_scheme,
                 rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
             )
-            pde_params_dir = os.path.join(work_dir, "pde_params")
+            pde_params_dir = os.path.join(work_dir, "pde_params_continued")
             pde_solver.load_params(pde_params_dir)
             lambda_value = jnp.float32(run_sett["pde_solver"]["lambda"])
             pde_solver.train(
                 log_fn=(lambda payload: log_fn({**payload, "lambda": lambda_value}))
             )
-            pde_params_dir = os.path.join(work_dir, "pde_params_continued")
+            pde_params_dir = os.path.join(work_dir, "pde_params_continued2")
             pde_solver.save_params(pde_params_dir)
     elif mode == "sample":
         jax.config.update(
             "jax_enable_x64", True
         )  # while the generation of the data was performed in double precision (fp64)
         print("Running in sampling-only mode…")
-        downsampling_factor = int(run_sett["general"]["d"]) // int(
-            run_sett["general"]["d_prime"]
-        )
-        C_prime = jnp.array(
-            [
-                [
-                    1 if j == downsampling_factor * i else 0
-                    for j in range(int(run_sett["general"]["d"]))
-                ]
-                for i in range(int(run_sett["general"]["d_prime"]))
-            ]
-        )
+
         denoise_fn = restore_denoise_fn(f"{work_dir}/checkpoints", denoiser_model)
+        sample_file = os.path.join(work_dir, f"samples_{run_sett['option']}.h5")
         if run_sett["option"] == "unconditional":
             samples = sample_unconditional(
                 diffusion_scheme,
@@ -190,6 +221,12 @@ def main():
             )
             print(jnp.mean(samples))
             print(samples.std())
+            save_samples_h5(
+                sample_file,
+                samples,
+                run_settings=run_sett,
+                rng_key=run_sett["rng_key"],
+            )
         elif run_sett["option"] == "wan_conditional":
             num_models = int(run_sett["pde_solver"]["num_models"])  # C
             samples_per_condition = int(run_sett["pde_solver"]["num_gen_samples"])  # N
@@ -213,47 +250,13 @@ def main():
                 )
             print(samples.std())
             print(samples.shape)
-            constraint_rmse = calculate_constraint_rmse(
+            save_samples_h5(
+                sample_file,
                 samples,
-                u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
-                C_prime,
+                y_bar=y_bars,
+                run_settings=run_sett,
+                rng_key=run_sett["rng_key"],
             )
-            kld = calculate_kld_pooled(
-                samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
-            )
-            sample_variability = calculate_sample_variability(samples)
-            melr_weighted = calculate_melr_pooled(
-                samples,
-                u_hfhr_samples,
-                sample_shape=(run_sett["general"]["d"],),
-                weighted=True,
-                epsilon=float(run_sett["epsilon"]),
-            )
-            melr_unweighted = calculate_melr_pooled(
-                samples,
-                u_hfhr_samples,
-                sample_shape=(run_sett["general"]["d"],),
-                weighted=False,
-                epsilon=float(run_sett["epsilon"]),
-            )
-
-            print(
-                "constraint_rmse: ",
-                constraint_rmse,
-                "sample_variability: ",
-                sample_variability,
-                "melr_unweighted: ",
-                melr_unweighted,
-                "melr_weighted: ",
-                melr_weighted,
-                "kld: ",
-                kld,
-            )
-            writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
-            writer.write_scalar("metrics/kld", float(kld))
-            writer.write_scalar("metrics/sample_variability", float(sample_variability))
-            writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
-            writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
         elif run_sett["option"] == "conditional":
             pde_solver = KSStatisticalDownscalingPDESolver(
                 samples=u_hfhr_samples,
@@ -263,7 +266,7 @@ def main():
                 scheme=diffusion_scheme,
                 rng_key=jax.random.PRNGKey(run_sett["rng_key"]),
             )
-            pde_params_dir = os.path.join(work_dir, "pde_params")
+            pde_params_dir = os.path.join(work_dir, "pde_params_continued2")
             pde_solver.load_params(pde_params_dir)
             samples = sample_pde_guided(
                 diffusion_scheme,
@@ -274,42 +277,69 @@ def main():
             )
             print(samples.std())
             print(samples.shape)
-            constraint_rmse = calculate_constraint_rmse(
+            num_models = int(run_sett["pde_solver"]["num_models"])
+            y_bars = u_lflr_samples[:num_models]
+            save_samples_h5(
+                sample_file,
                 samples,
-                u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
-                C_prime,
+                y_bar=y_bars,
+                run_settings=run_sett,
+                rng_key=run_sett["rng_key"],
             )
-            kld = calculate_kld_pooled(
-                samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
-            )
-            sample_variability = calculate_sample_variability(samples)
-            melr_weighted = calculate_melr_pooled(
-                samples,
-                u_hfhr_samples,
-                sample_shape=(run_sett["general"]["d"],),
-                weighted=True,
-                epsilon=float(run_sett["epsilon"]),
-            )
-            melr_unweighted = calculate_melr_pooled(
-                samples,
-                u_hfhr_samples,
-                sample_shape=(run_sett["general"]["d"],),
-                weighted=False,
-                epsilon=float(run_sett["epsilon"]),
-            )
+    elif mode == "eval":
+        downsampling_factor = int(run_sett["general"]["d"]) // int(
+            run_sett["general"]["d_prime"]
+        )
+        C_prime = jnp.array(
+            [
+                [
+                    1 if j == downsampling_factor * i else 0
+                    for j in range(int(run_sett["general"]["d"]))
+                ]
+                for i in range(int(run_sett["general"]["d_prime"]))
+            ]
+        )
+        print("Running in evaluation mode…")
+        sample_file = os.path.join(work_dir, f"samples_{run_sett['option']}.h5")
+        samples = load_samples_h5(sample_file, as_jax=True)
 
-            print(
-                "constraint_rmse: ",
-                constraint_rmse,
-                "sample_variability: ",
-                sample_variability,
-                "melr_unweighted: ",
-                melr_unweighted,
-                "melr_weighted: ",
-                melr_weighted,
-                "kld: ",
-                kld,
-            )
+        constraint_rmse = calculate_constraint_rmse(
+            samples,
+            u_lflr_samples[0 : int(run_sett["pde_solver"]["num_models"])],
+            C_prime,
+        )
+        kld = calculate_kld_pooled(
+            samples, u_hfhr_samples, epsilon=float(run_sett["epsilon"])
+        )
+        sample_variability = calculate_sample_variability(samples)
+        melr_weighted = calculate_melr_pooled(
+            samples,
+            u_hfhr_samples,
+            sample_shape=(run_sett["general"]["d"],),
+            weighted=True,
+            epsilon=float(run_sett["epsilon"]),
+        )
+        melr_unweighted = calculate_melr_pooled(
+            samples,
+            u_hfhr_samples,
+            sample_shape=(run_sett["general"]["d"],),
+            weighted=False,
+            epsilon=float(run_sett["epsilon"]),
+        )
+
+        print(
+            "constraint_rmse: ",
+            constraint_rmse,
+            "sample_variability: ",
+            sample_variability,
+            "melr_unweighted: ",
+            melr_unweighted,
+            "melr_weighted: ",
+            melr_weighted,
+            "kld: ",
+            kld,
+        )
+        if use_wandb:
             writer.write_scalar("metrics/constraint_rmse", float(constraint_rmse))
             writer.write_scalar("metrics/kld", float(kld))
             writer.write_scalar("metrics/sample_variability", float(sample_variability))
