@@ -320,6 +320,7 @@ def main():
             writer.write_scalar("metrics/sample_variability", float(sample_variability))
             writer.write_scalar("metrics/melr_weighted", float(melr_weighted))
             writer.write_scalar("metrics/melr_unweighted", float(melr_unweighted))
+            writer.write_scalar("metrics/wass1", float(wass1))
 
     # Flush/close the writer once
     try:
