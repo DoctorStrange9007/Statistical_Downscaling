@@ -89,7 +89,7 @@ class LinearConstraint:
         # Rescale guidance strength
         guide_strength = norm_guide_strength
         if cond_fraction > 0:
-            guide_strength /= cond_fraction
+            guide_strength *= cond_fraction
 
         _, _, v_transpose = jnp.linalg.svd(C_prime, full_matrices=False)
         v_matrix = v_transpose.T
