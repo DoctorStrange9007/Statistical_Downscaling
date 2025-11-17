@@ -215,7 +215,10 @@ def _get_k_grids(sample_shape: tuple):
     # Use a fixed, large number of bins to make it JIT-compatible.
     max_bins = max(sample_shape) // 2 + 1
     k_bins = jnp.arange(0.5, max_bins)
-    return k_magnitude, k_bins
+
+    counts, _ = jnp.histogram(k_magnitude.flatten(), bins=k_bins)
+
+    return k_magnitude, k_bins, counts
 
 
 def _get_energy_spectrum_for_one_sample(
@@ -233,9 +236,8 @@ def _get_energy_spectrum_for_one_sample(
     energy_spectrum, _ = jnp.histogram(
         k_magnitude.flatten(), bins=k_bins, weights=power_spectrum.flatten()
     )
-    counts, _ = jnp.histogram(k_magnitude.flatten(), bins=k_bins)
 
-    return jnp.where(counts > 0, energy_spectrum / counts, 0.0)
+    return energy_spectrum
 
 
 @partial(jax.jit, static_argnames=["sample_shape", "weighted"])
@@ -249,6 +251,8 @@ def calculate_melr_pooled(
     """
     Calculates average MELR by vmapping over the C-axis (conditions).
     """
+    if predicted_samples.ndim == 3:
+        predicted_samples = predicted_samples[:, None, :, :]
     num_pooled_samples = predicted_samples.shape[0] * predicted_samples.shape[1]
     num_dimensions = predicted_samples.shape[2]
     pooled_predicted_samples = jnp.reshape(
@@ -259,7 +263,7 @@ def calculate_melr_pooled(
     pred_clean = jnp.squeeze(pooled_predicted_samples, axis=-1)  # Shape: (N*C, D)
     ref_clean = jnp.squeeze(reference_samples, axis=-1)  # Shape: (M, D)
 
-    k_magnitude, k_bins = _get_k_grids(sample_shape)
+    k_magnitude, k_bins, counts = _get_k_grids(sample_shape)
 
     vmapped_spectrum_fn = jax.vmap(
         _get_energy_spectrum_for_one_sample, in_axes=(0, None, None, None)
