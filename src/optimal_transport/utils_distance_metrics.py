@@ -117,26 +117,23 @@ def calculate_kld_pooled(
 
 def calculate_kld_OT(policy_gradient, true_data_model):
 
-    z_trajs_list = []
-    y_trajs_list = []
-    z_trajs_prime_list = []
-    y_trajs_prime_list = []
-    for sample_OT in range(100):
-        z_traj, z_traj_prime = true_data_model.get_true_trajectory()
-        y_traj, y_traj_prime = policy_gradient.get_trajectory()
+    # Vectorized, key-driven sampling for B=100 trajectories from both models
+    B = policy_gradient.run_sett["num_samples_metrics"]
+    key_master = jax.random.PRNGKey(int(policy_gradient.run_sett["seed"]))
+    key_model, key_true = jax.random.split(key_master)
+    keys_model = jax.random.split(key_model, B)
+    keys_true = jax.random.split(key_true, B)
 
-        z_trajs_list.append(z_traj)
-        z_trajs_prime_list.append(z_traj_prime)
-        y_trajs_list.append(y_traj)
-        y_trajs_prime_list.append(y_traj_prime)
+    y_trajs, y_trajs_prime = jax.vmap(
+        policy_gradient.normalized_flow_model.sample_trajectory, in_axes=(0,)
+    )(keys_model)
+    z_trajs, z_trajs_prime = jax.vmap(
+        true_data_model.sample_true_trajectory, in_axes=(0,)
+    )(keys_true)
 
-    z_trajs = jnp.stack(z_trajs_list, axis=0)  # (100, 48, 1)
-    z_trajs_prime = jnp.stack(z_trajs_prime_list, axis=0)  # (100, 48, 1)
-    y_trajs = jnp.stack(y_trajs_list, axis=0)  # (100, 48, 1)
-    y_trajs_prime = jnp.stack(y_trajs_prime_list, axis=0)  # (100, 48, 1)
-
-    kld_OT = calculate_kld_pooled(y_trajs, y_trajs_prime)
-    kld_OT_prime = calculate_kld_pooled(z_trajs, z_trajs_prime)
+    # Pooled KLD across batch and time axes, per channel
+    kld_OT = calculate_kld_pooled(y_trajs, z_trajs)
+    kld_OT_prime = calculate_kld_pooled(y_trajs_prime, z_trajs_prime)
 
     return (kld_OT, kld_OT_prime)
 
@@ -277,23 +274,19 @@ def calculate_wass1_pooled(
 
 def calculate_wass1_OT(policy_gradient, true_data_model):
 
-    z_trajs_list = []
-    y_trajs_list = []
-    z_trajs_prime_list = []
-    y_trajs_prime_list = []
-    for sample_OT in range(100):
-        z_traj, z_traj_prime = true_data_model.get_true_trajectory()
-        y_traj, y_traj_prime = policy_gradient.get_trajectory()
+    # Vectorized, key-driven sampling for B=100 trajectories from both models
+    B = policy_gradient.run_sett["num_samples_metrics"]
+    key_master = jax.random.PRNGKey(int(policy_gradient.run_sett["seed"]))
+    key_model, key_true = jax.random.split(key_master)
+    keys_model = jax.random.split(key_model, B)
+    keys_true = jax.random.split(key_true, B)
 
-        z_trajs_list.append(z_traj)
-        z_trajs_prime_list.append(z_traj_prime)
-        y_trajs_list.append(y_traj)
-        y_trajs_prime_list.append(y_traj_prime)
-
-    z_trajs = jnp.stack(z_trajs_list, axis=0)  # (100, 48, 1)
-    z_trajs_prime = jnp.stack(z_trajs_prime_list, axis=0)  # (100, 48, 1)
-    y_trajs = jnp.stack(y_trajs_list, axis=0)  # (100, 48, 1)
-    y_trajs_prime = jnp.stack(y_trajs_prime_list, axis=0)  # (100, 48, 1)
+    y_trajs, y_trajs_prime = jax.vmap(
+        policy_gradient.normalized_flow_model.sample_trajectory, in_axes=(0,)
+    )(keys_model)
+    z_trajs, z_trajs_prime = jax.vmap(
+        true_data_model.sample_true_trajectory, in_axes=(0,)
+    )(keys_true)
 
     wass1_OT = calculate_wass1_pooled(y_trajs, y_trajs_prime)
     wass1_OT_prime = calculate_wass1_pooled(z_trajs, z_trajs_prime)

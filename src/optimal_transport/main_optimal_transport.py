@@ -13,6 +13,7 @@ from src.optimal_transport.utils_distance_metrics import (
     calculate_kld_OT,
     calculate_wass1_OT,
 )
+import jax
 
 
 parser = argparse.ArgumentParser()
@@ -31,8 +32,10 @@ def main():
         true_data_model=true_data_model,
     )
 
+    key_master = jax.random.PRNGKey(int(run_sett["seed"]))
     for _ in range(int(run_sett["num_iterations"])):
-        policy_gradient.update_params()
+        key_step = jax.random.fold_in(key_master, _)
+        policy_gradient.update_params(key_step)
         print(f"Iteration {_} completed")
 
     print(policy_gradient.normalized_flow_model.param_models)
