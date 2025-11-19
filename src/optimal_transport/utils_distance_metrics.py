@@ -3,6 +3,8 @@ import jax.numpy as jnp
 from jax.scipy.stats import gaussian_kde
 from jax.scipy.integrate import trapezoid
 from functools import partial
+import matplotlib.pyplot as plt
+import os
 
 
 def _single_dimension_calculate_kld(
@@ -115,18 +117,19 @@ def calculate_kld_pooled(
     return kld
 
 
-def calculate_kld_OT(policy_gradient, true_data_model):
+def calculate_kld_OT(policy_gradient, true_data_model, key):
 
-    # Vectorized, key-driven sampling for B=100 trajectories from both models
+    # Vectorized, key-driven sampling for B trajectories from both models
     B = policy_gradient.run_sett["num_samples_metrics"]
-    key_master = jax.random.PRNGKey(int(policy_gradient.run_sett["seed"]))
-    key_model, key_true = jax.random.split(key_master)
+    key_model, key_true = jax.random.split(key)
     keys_model = jax.random.split(key_model, B)
     keys_true = jax.random.split(key_true, B)
 
+    params_trees = policy_gradient.normalizing_flow_model.params_trees
+
     y_trajs, y_trajs_prime = jax.vmap(
-        policy_gradient.normalized_flow_model.sample_trajectory, in_axes=(0,)
-    )(keys_model)
+        policy_gradient.normalizing_flow_model.sample_trajectory, in_axes=(0, None)
+    )(keys_model, params_trees)
     z_trajs, z_trajs_prime = jax.vmap(
         true_data_model.sample_true_trajectory, in_axes=(0,)
     )(keys_true)
@@ -272,23 +275,154 @@ def calculate_wass1_pooled(
     return wass1
 
 
-def calculate_wass1_OT(policy_gradient, true_data_model):
+def calculate_wass1_OT(policy_gradient, true_data_model, key):
 
-    # Vectorized, key-driven sampling for B=100 trajectories from both models
+    # Vectorized, key-driven sampling for B trajectories from both models
     B = policy_gradient.run_sett["num_samples_metrics"]
-    key_master = jax.random.PRNGKey(int(policy_gradient.run_sett["seed"]))
-    key_model, key_true = jax.random.split(key_master)
+    key_model, key_true = jax.random.split(key)
     keys_model = jax.random.split(key_model, B)
     keys_true = jax.random.split(key_true, B)
 
+    params_trees = policy_gradient.normalizing_flow_model.params_trees
+
     y_trajs, y_trajs_prime = jax.vmap(
-        policy_gradient.normalized_flow_model.sample_trajectory, in_axes=(0,)
-    )(keys_model)
+        policy_gradient.normalizing_flow_model.sample_trajectory, in_axes=(0, None)
+    )(keys_model, params_trees)
     z_trajs, z_trajs_prime = jax.vmap(
         true_data_model.sample_true_trajectory, in_axes=(0,)
     )(keys_true)
 
-    wass1_OT = calculate_wass1_pooled(y_trajs, y_trajs_prime)
-    wass1_OT_prime = calculate_wass1_pooled(z_trajs, z_trajs_prime)
+    wass1_OT = calculate_wass1_pooled(y_trajs, z_trajs)
+    wass1_OT_prime = calculate_wass1_pooled(y_trajs_prime, z_trajs_prime)
 
     return (wass1_OT, wass1_OT_prime)
+
+
+def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer):
+    """
+    Plots the marginal distributions (histograms) of the first `dims` dimensions
+    for both y and y' at time step `n`.
+
+    Layout:
+    - Rows: Dimensions (0 to dims-1)
+    - Col 0: y (True vs Flow)
+    - Col 1: y' (True vs Flow)
+    """
+    # 1. Setup keys and batch size
+    num_bins = 100
+    key = jax.random.PRNGKey(int(run_sett["seed"]))
+    B_plot = int(run_sett["num_samples_metrics"])
+    keys = jax.random.split(key, B_plot)
+
+    params_trees = policy_gradient.normalizing_flow_model.params_trees
+
+    # 2. Batch-generate trajectories (Capture both y and y_prime)
+    # Shape: [Batch, Time, Dim, 1]
+    true_y, true_y_prime = jax.vmap(
+        true_data_model.sample_true_trajectory, in_axes=(0,)
+    )(keys)
+    flow_y, flow_y_prime = jax.vmap(
+        policy_gradient.normalizing_flow_model.sample_trajectory, in_axes=(0, None)
+    )(keys, params_trees)
+
+    # 3. Extract specific time step n and move to host
+    # We slice [:, n, :, 0] to get shape [Batch, Dim]
+    t_y_n = jnp.array(true_y[:, n, :, 0])
+    f_y_n = jnp.array(flow_y[:, n, :, 0])
+
+    t_yp_n = jnp.array(true_y_prime[:, n, :, 0])
+    f_yp_n = jnp.array(flow_y_prime[:, n, :, 0])
+
+    # 4. Create Plot Grid (dims rows x 2 columns)
+    fig, axes = plt.subplots(dims, 2, figsize=(12, 4 * dims))
+
+    # Handle case where dims=1 (axes is 1D array)
+    if dims == 1:
+        axes = axes.reshape(1, 2)
+
+    for d in range(dims):
+        # --- Column 1: Unprimed y ---
+        ax_y = axes[d, 0]
+
+        # Determine bin range to ensure fair comparison
+        data_y = jnp.concatenate([t_y_n[:, d], f_y_n[:, d]])
+        bins_y = jnp.linspace(data_y.min(), data_y.max(), num_bins)
+
+        ax_y.hist(
+            t_y_n[:, d],
+            bins=bins_y,
+            alpha=0.5,
+            color="blue",
+            density=True,
+            label="True Data",
+        )
+        ax_y.hist(
+            f_y_n[:, d],
+            bins=bins_y,
+            alpha=0.5,
+            color="red",
+            density=True,
+            label="Flow Generated",
+        )
+
+        ax_y.set_title(f"y_{d} (t={n})")
+        ax_y.set_ylabel("Density")
+        ax_y.legend()
+
+        # --- Column 2: Primed y' ---
+        ax_yp = axes[d, 1]
+
+        # Determine bin range
+        data_yp = jnp.concatenate([t_yp_n[:, d], f_yp_n[:, d]])
+        bins_yp = jnp.linspace(data_yp.min(), data_yp.max(), num_bins)
+
+        ax_yp.hist(
+            t_yp_n[:, d],
+            bins=bins_yp,
+            alpha=0.5,
+            color="blue",
+            density=True,
+            label="True Data",
+        )
+        ax_yp.hist(
+            f_yp_n[:, d],
+            bins=bins_yp,
+            alpha=0.5,
+            color="red",
+            density=True,
+            label="Flow Generated",
+        )
+
+        ax_yp.set_title(f"y'_{d} (t={n})")
+        ax_yp.legend()
+
+    fig.tight_layout()
+
+    out_dir = os.path.join(os.getcwd(), "main_optimal_transport")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(
+        out_dir,
+        f"comparison_hist_t{n}_dims{dims}_seed{run_sett.get('seed', 'unknown')}.png",
+    )
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)  # free memory
+    # Log at a clear, final step so it shows up in W&B media pane
+    try:
+        final_step = int(run_sett.get("num_iterations", 1)) - 1
+        if hasattr(writer, "set_step"):
+            writer.set_step(final_step)
+        writer.write_images(images={"comparison_hist": out_path}, step=final_step)
+    except Exception:
+        # Fallback without explicit step
+        writer.write_images(images={"comparison_hist": out_path})
+
+
+def plot_distance_metrics(
+    kld_OT_history, kld_OT_prime_history, wass1_OT_history, wass1_OT_prime_history
+):
+    plt.plot(kld_OT_history, label="KLD OT")
+    plt.plot(kld_OT_prime_history, label="KLD OT Prime")
+    plt.plot(wass1_OT_history, label="Wass1 OT")
+    plt.plot(wass1_OT_prime_history, label="Wass1 OT Prime")
+    plt.legend()
+    plt.show()
