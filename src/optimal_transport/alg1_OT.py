@@ -25,7 +25,6 @@ class PolicyGradient:
         """
         self.run_sett = run_sett  # Store the full run_sett
         self.beta = self.run_sett["beta"]
-        self.K = self.run_sett["K"]
         self.N = self.run_sett["N"]
         self.d_prime = self.run_sett["d_prime"]
         self.true_data_model = true_data_model
@@ -122,9 +121,7 @@ class PolicyGradient:
         """
         y_n_to_N = y_traj[n:]
         y_n_prime_to_N = y_traj_prime[n:]
-        # return (1/2)*jnp.sum(jnp.abs(y_n_to_N - y_n_prime_to_N))
-
-        return 1.0
+        return (1 / 2) * jnp.sum(jnp.abs(y_n_to_N - y_n_prime_to_N))
 
     @partial(jax.jit, static_argnums=0)
     def collect_fitting_data_per_trajectory(self, key, params_trees):
@@ -243,8 +240,13 @@ class PolicyGradient:
 
     @partial(jax.jit, static_argnums=0)
     def compute_updates(self, params_trees, grads_trees, lrate):
+        clip_val = 1.0
         return [
-            tree_map(lambda p, g: p - lrate * g, p_tree, g_tree)
+            tree_map(
+                lambda p, g: p - lrate * jnp.clip(g, -clip_val, clip_val),
+                p_tree,
+                g_tree,
+            )
             for p_tree, g_tree in zip(params_trees, grads_trees)
         ]
 
@@ -293,17 +295,22 @@ class NormalizingFlowModel:
             mask = jnp.arange(0, self.state_action_dim) % 2 == (i % 2)
 
             def conditioner(x):
-                dummy_state = jnp.zeros_like(
-                    x
-                )  # we need same shape as n>0 for grad calculations with lax.scan
+                dummy_state = jnp.zeros_like(x)
+                init = hk.initializers.VarianceScaling(
+                    scale=1.0, mode="fan_avg", distribution="uniform"
+                )
                 model_input = jnp.concatenate([x, dummy_state], axis=-1)
                 mlp = hk.Sequential(
                     [
-                        hk.Linear(self.hidden_size),
+                        hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
-                        hk.Linear(self.hidden_size),
+                        hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
-                        hk.Linear(self.state_action_dim * 2, w_init=jnp.zeros),
+                        hk.Linear(
+                            self.state_action_dim * 2,
+                            w_init=jnp.zeros,
+                            b_init=jnp.zeros,
+                        ),
                         hk.Reshape((self.state_action_dim, 2)),
                     ]
                 )
@@ -336,14 +343,21 @@ class NormalizingFlowModel:
             mask = jnp.arange(0, self.state_action_dim) % 2 == (i % 2)
 
             def conditioner(x):
+                init = hk.initializers.VarianceScaling(
+                    scale=1.0, mode="fan_avg", distribution="uniform"
+                )
                 model_input = jnp.concatenate([x, prev_state], axis=-1)
                 mlp = hk.Sequential(
                     [
-                        hk.Linear(self.hidden_size),
+                        hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
-                        hk.Linear(self.hidden_size),
+                        hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
-                        hk.Linear(self.state_action_dim * 2, w_init=jnp.zeros),
+                        hk.Linear(
+                            self.state_action_dim * 2,
+                            w_init=jnp.zeros,
+                            b_init=jnp.zeros,
+                        ),
                         hk.Reshape((self.state_action_dim, 2)),
                     ]
                 )

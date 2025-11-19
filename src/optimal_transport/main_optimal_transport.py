@@ -12,6 +12,7 @@ import yaml
 from src.optimal_transport.utils_distance_metrics import (
     calculate_kld_OT,
     calculate_wass1_OT,
+    cost_function_OT,
     plot_comparison,
 )
 import jax
@@ -68,6 +69,7 @@ def main():
         (wass1_OT, wass1_OT_prime) = calculate_wass1_OT(
             policy_gradient, true_data_model, metrics_key
         )
+        cost_function = cost_function_OT(policy_gradient, true_data_model, metrics_key)
         if use_wandb:
             # Log all metrics at the current iteration step to create one row per loop
             writer.write_scalars(
@@ -77,6 +79,7 @@ def main():
                     "metrics/kld_OT_prime": float(kld_OT_prime),
                     "metrics/wass1_OT": float(wass1_OT),
                     "metrics/wass1_OT_prime": float(wass1_OT_prime),
+                    "metrics/cost_function": float(cost_function),
                 },
             )
 
