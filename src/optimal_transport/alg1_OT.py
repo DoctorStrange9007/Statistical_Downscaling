@@ -9,19 +9,40 @@ import distrax
 
 class PolicyGradient:
     """
-    Implements a linear Markov Decision Process (MDP) for statistical downscaling.
+    PolicyGradient class for the optimal transport problem.
 
-    This class provides methods for optimizing mixture model parameters using gradient descent
-    to minimize the KL divergence between a parameterized model and a target transition kernel.
-    The optimization includes both cost terms and KL divergence regularization.
+    This class computes gradients for a sequence of normalizing-flow models
+    defining joint densities q_0, q_1, ..., q_N over pairs (y_n, y'_n).
+    The total objective consists of:
+      - A cost term based on a joint quadratic cost function over trajectory
+        segments (n..N), and
+      - A KL-based regularizer w.r.t. a true data model.
 
-    The model operates on pairs of states (y, y') and can use different forms parameterized model and target kernel
-    (e.g. mixture of Gaussians).
+    Gradients are estimated from mini-batches of sampled trajectories using
+    control variates. For n >= 1, the control variate is linear in a feature
+    vector built from the previous pair (y_{n-1}, y'_{n-1}); for n = 0 a
+    constant control variate is used. Closed-form, weighted least-squares fits
+    are used to determine optimal control-variates per time n.
     """
 
     def __init__(self, run_sett: dict, normalizing_flow_model, true_data_model):
         """
         Initialize the PolicyGradient object.
+
+        Args:
+            run_sett: Dictionary of run settings. Must contain:
+                - "beta": float, KL regularization weight
+                - "N": int, number of transitions (trajectory length is N+1)
+                - "d_prime": int, dimension per y (and y')
+                - "B": int, batch size for gradient estimation
+                - "lrates": float or sequence, learning rate(s); if a sequence,
+                  the first element is used here
+            normalizing_flow_model: Model exposing:
+                - params_trees: list of N+1 parameter pytrees
+                - sample_trajectory(key, params_trees) -> (y_traj, y_traj_prime)
+                - get_log_prob_grad(params, n, action, state=None) -> grad pytree
+            true_data_model: Model exposing:
+                - sample_true_trajectory(key) -> (z_traj, z_traj_prime)
         """
         self.run_sett = run_sett  # Store the full run_sett
         self.beta = self.run_sett["beta"]
@@ -36,12 +57,22 @@ class PolicyGradient:
         )
         self.d_phi = 2 * self.d_prime + 1
 
-    def _get_baseline_features(
+    def _get_control_variate_features(
         self, prev_y: jnp.ndarray, prev_yp: jnp.ndarray
     ) -> jnp.ndarray:
         """
-        [DEFINITION OF phi_k,n - Eq. 86]
-        Constructs the feature vector phi(y_prev, y_prev_prime) = [1, y_prev, y_prev_prime].
+        Build the linear control-variate feature vector for time n >= 1.
+
+        Given previous observations (y_{n-1}, y'_{n-1}), returns
+        phi_{n} = concat([1, y_{n-1}, y'_{n-1}]).
+
+        Args:
+            prev_y: Array with shape (d_prime, 1) or (d_prime,), previous y.
+            prev_yp: Array with shape (d_prime, 1) or (d_prime,), previous y'.
+
+        Returns:
+            Array with shape (2 * d_prime + 1,), the feature vector
+            [1, prev_y, prev_yp].
         """
 
         prev_y = jnp.squeeze(prev_y)
@@ -50,26 +81,55 @@ class PolicyGradient:
         # Feature vector: [1 (bias), y_n-1 (d_prime), y'_n-1 (d_prime)]
         return jnp.concatenate([jnp.ones(1), prev_y, prev_yp])
 
-    def fit_baselines(self, V, S, Phi):
+    def fit_control_variates(self, costs_V, grads_S_norm_sq_per_batch, phi_features):
         """
-        Fits the optimal constant baseline (n=0, Eq. 88) and linear baselines (n=1..N, Eq. 87)
-        using the closed-form solutions derived from least-squares minimization.
+        Fit optimal control-variates per time n using closed-form WLS.
+
+        For n = 0, fits a scalar constant c that minimizes the squared error of the cost w.r.t c.
+        For each n = 1..N, fits a weight vector w_n for
+        the linear control variate l_n(phi) = phi^T w_n. The weighting per
+        sample uses the squared score-norm at time n.
+
+        Args:
+            costs_V: Sequence of length N+1. Each entry is an array of shape (B,)
+                with the joint cost V_n for each trajectory in the batch.
+            grads_S_norm_sq_per_batch: Sequence of length N+1. Each entry is an
+                array of shape (B,) with the per-trajectory squared L2 norm of
+                the score (gradient of log-prob) at time n.
+            phi_features: Sequence of length N. Each entry is an array with shape
+                (B, d_phi) containing features for n = 1..N, where
+                d_phi = 2 * d_prime + 1.
+
+        Returns:
+            Dict with:
+              - "c": scalar constant control variate for n = 0
+              - "w": array with shape (N, d_phi), linear weights for n = 1..N
         """
 
-        V0, S0 = V[0], S[0]
+        cost_V_0, grad_S_0 = costs_V[0], grads_S_norm_sq_per_batch[0]
 
-        c_numerator = jnp.sum(V0 * S0)
-        c_optimal = c_numerator / jnp.sum(S0)
+        c_numerator = jnp.sum(cost_V_0 * grad_S_0)
+        c_optimal = c_numerator / jnp.sum(grad_S_0)
 
-        V_stack = jnp.stack(V[1:])
-        S_stack = jnp.stack(S[1:])
-        Phi_stack = jnp.stack(Phi)
+        costs_V_stack = jnp.stack(costs_V[1:])
+        grad_S_norm_sq_per_batch_stack = jnp.stack(grads_S_norm_sq_per_batch[1:])
+        phi_features_stack = jnp.stack(phi_features)
 
-        # A = sum_b (S * phi * phi^T) -> shape (N, D_phi, D_phi)
-        A = jnp.einsum("nbi,nb,nbj->nij", Phi_stack, S_stack, Phi_stack)
+        # A = sum_b (S phi phi^T)
+        A = jnp.einsum(
+            "nbi,nb,nbj->nij",
+            phi_features_stack,
+            grad_S_norm_sq_per_batch_stack,
+            phi_features_stack,
+        )
 
-        # b = sum_b (S * phi * V) -> shape (N, D_phi)
-        b_vec = jnp.einsum("nbi,nb,nb->ni", Phi_stack, S_stack, V_stack)
+        # b = sum_b  (S V phi)
+        b_vec = jnp.einsum(
+            "nbi,nb,nb->ni",
+            phi_features_stack,
+            grad_S_norm_sq_per_batch_stack,
+            costs_V_stack,
+        )
 
         w_optimal = jnp.linalg.solve(A, b_vec[..., None]).squeeze(-1)
 
@@ -77,123 +137,190 @@ class PolicyGradient:
 
     def per_trajectory_joint_score(self, n, y_traj, y_traj_prime, params_trees):
         """
-        Compute gradient of q_n density w.r.t. params at index n, for a single trajectory.
-        Uses JAX control flow to support tracer n from vmap.
+        Per-trajectory gradient of log q_n w.r.t. parameters at time n.
+
+        Selects the correct flow (unconditional for n = 0, conditional for
+        n >= 1) and returns the gradient of the log-probability density evaluated
+        at the (state, action) extracted from a single trajectory.
+
+        Args:
+            n: Integer in [0, N], index of the flow.
+            y_traj: Array with shape (N+1, d_prime, 1), trajectory of y.
+            y_traj_prime: Array with shape (N+1, d_prime, 1), trajectory of y'.
+            params_trees: List of N+1 parameter pytrees; params_trees[n] is used.
+
+        Returns:
+            Pytree matching the structure of params_trees[n], containing the
+            gradient of the log-probability density for this trajectory and time.
+
+        Notes:
+            Uses lax.switch so that n can be a traced value inside vmaps.
         """
 
-        def make_branch(k: int):
-            if k == 0:
+        def make_branch(n: int):
+            if n == 0:
 
-                def branch(_op=None, k=k):
+                def branch(_op=None, n=n):
                     action = jnp.concatenate(
                         [y_traj[0].reshape(-1), y_traj_prime[0].reshape(-1)], axis=0
                     )
 
                     return self.normalizing_flow_model.get_log_prob_grad(
-                        params_trees[k], k, action=action, state=None
+                        params_trees[0], 0, action=action, state=None
                     )
 
                 return branch
             else:
 
-                def branch(_op=None, k=k):
+                def branch(_op=None, n=n):
                     state = jnp.concatenate(
-                        [y_traj[k - 1].reshape(-1), y_traj_prime[k - 1].reshape(-1)],
+                        [y_traj[n - 1].reshape(-1), y_traj_prime[n - 1].reshape(-1)],
                         axis=0,
                     )
                     action = jnp.concatenate(
-                        [y_traj[k].reshape(-1), y_traj_prime[k].reshape(-1)],
+                        [y_traj[n].reshape(-1), y_traj_prime[n].reshape(-1)],
                         axis=0,
                     )
 
                     return self.normalizing_flow_model.get_log_prob_grad(
-                        params_trees[k], k, action=action, state=state
+                        params_trees[n], n, action=action, state=state
                     )
 
                 return branch
 
-        branches = [make_branch(k) for k in range(self.N + 1)]
+        branches = [make_branch(n) for n in range(self.N + 1)]
         return lax.switch(n, branches, None)
 
     def per_trajectory_joint_cost(self, n, y_traj, y_traj_prime):
         """
-        Compute the joint cost for a trajectory.
+        Compute the joint quadratic cost from step n through N for one trajectory.
+
+        The cost at time n is:
+            V_n = 0.5 * sum_{k=n}^N || y_k - y'_k ||_2^2
+
+        Args:
+            n: Integer in [0, N], start index for the accumulated cost.
+            y_traj: Array with shape (N+1, d_prime, 1), trajectory of y.
+            y_traj_prime: Array with shape (N+1, d_prime, 1), trajectory of y'.
+
+        Returns:
+            Scalar array, the accumulated cost V_n for this trajectory.
         """
         y_n_to_N = y_traj[n:]
         y_n_prime_to_N = y_traj_prime[n:]
-        return (1 / 2) * jnp.sum(jnp.abs(y_n_to_N - y_n_prime_to_N))
+        return (1 / 2) * jnp.sum(
+            (y_n_to_N - y_n_prime_to_N) ** 2
+        )  # sums over axes n to N and d_prime
 
     @partial(jax.jit, static_argnums=0)
     def collect_fitting_data_per_trajectory(self, key, params_trees):
+        """
+        Collect per-trajectory quantities needed to fit control variates.
+
+        For a single sampled trajectory, returns:
+          - The score gradients at each time n (as pytrees),
+          - The joint costs V_n for n = 0..N,
+          - The feature vectors phi_n for n = 1..N.
+
+        Args:
+            key: PRNGKey for sampling the trajectory.
+            params_trees: List of N+1 parameter pytrees used for sampling.
+
+        Returns:
+            Tuple of (grads_S, costs_V, phi_features) where:
+              - grads_S: tuple length N+1; entry n is a pytree of gradients
+                for time n (no batch dimension).
+              - costs_V: tuple length N+1 of scalars V_n for this trajectory.
+              - phi_features: tuple length N of arrays with shape (d_phi,)
+                for times 1..N.
+        """
         y_traj, y_traj_prime = self.normalizing_flow_model.sample_trajectory(
             key, params_trees
         )
 
-        grads_all = [tree_map(jnp.zeros_like, p) for p in params_trees]
-
-        raw_grads = []
+        grads_S = []
         costs_V = []
         phi_features = []
 
-        for k in range(self.N + 1):
-            grad_k = self.per_trajectory_joint_score(
-                k, y_traj, y_traj_prime, params_trees
+        for n in range(self.N + 1):
+            grad_n = self.per_trajectory_joint_score(
+                n, y_traj, y_traj_prime, params_trees
             )
-            raw_grads.append(grad_k)
+            grads_S.append(grad_n)
 
-            cost_k = self.per_trajectory_joint_cost(k, y_traj, y_traj_prime)
-            costs_V.append(cost_k)
+            cost_n = self.per_trajectory_joint_cost(n, y_traj, y_traj_prime)
+            costs_V.append(cost_n)
 
-            if k > 0:
-                prev_y = y_traj[k - 1]
-                prev_yp = y_traj_prime[k - 1]
-                phi = self._get_baseline_features(prev_y, prev_yp)
-                phi_features.append(phi)
+            if n > 0:
+                prev_y = y_traj[n - 1]
+                prev_yp = y_traj_prime[n - 1]
+                phi_n = self._get_control_variate_features(prev_y, prev_yp)
+                phi_features.append(phi_n)
 
-        return tuple(raw_grads), tuple(costs_V), tuple(phi_features)
+        return tuple(grads_S), tuple(costs_V), tuple(phi_features)
 
     def G_val(self, key, params_trees):
+        """
+        Compute G_val -L (adjusted for control variates (note slightly different than notation in document)).
+
+        This function:
+          1) Samples B trajectories,
+          2) Computes per-time score gradients and costs,
+          3) Fits optimal control variates (constant for n=0, linear for n>=1),
+          4) Forms advantages (V_n - l_n) and weights gradients accordingly,
+          5) Sums gradients over the batch dimension.
+
+        Args:
+            key: PRNGKey for trajectory sampling.
+            params_trees: List of N+1 parameter pytrees.
+
+        Returns:
+            List length N+1 of pytrees. Each pytree matches params_trees[n] and
+            contains the batch-summed gradient contribution for time n (not
+            averaged by B yet).
+        """
         keys = jax.random.split(key, self.B)
-        raw_grads_batch, cost_V_batch, phi_features_batch = jax.vmap(
+        grads_S, costs_V, phi_features = jax.vmap(
             self.collect_fitting_data_per_trajectory, in_axes=(0, None)
         )(keys, params_trees)
 
-        cost_V_batch = [jnp.array(v) for v in cost_V_batch]
-        phi_features_batch = [jnp.array(p) for p in phi_features_batch]
+        costs_V = [jnp.array(v) for v in costs_V]
+        phi_features = [jnp.array(p) for p in phi_features]
 
-        S_norm_sq_batch = []
+        grads_S_norm_sq_per_batch = []
 
-        for t in range(self.N + 1):
-            grad_t = raw_grads_batch[t]
+        for n in range(self.N + 1):
+            grad_n = grads_S[n]
+            # iterates ocer all leaves of the gradient pytree computes squared L2,
+            # accumulates per leaf norms across the whole tree starting from 0.0
+            # resulting in length B vector with the total squared gradient norm for each batch at time n
             norm_sq_score = tree_reduce(
                 lambda a, x: a + jnp.sum(x**2, axis=tuple(range(1, x.ndim))),
-                grad_t,
+                grad_n,
                 0.0,
             )
-            S_norm_sq_batch.append(norm_sq_score)
+            grads_S_norm_sq_per_batch.append(norm_sq_score)
 
-        baselines = self.fit_baselines(
-            cost_V_batch, S_norm_sq_batch, phi_features_batch
+        control_variates_results = self.fit_control_variates(
+            costs_V, grads_S_norm_sq_per_batch, phi_features
         )
 
         final_grads_sum = []
-        for k in range(self.N + 1):
-            if k == 0:
-                baseline_values = baselines["c"]
+        for n in range(self.N + 1):
+            if n == 0:
+                l_n = control_variates_results["c"]
             else:
-                w_k = baselines["w"][k - 1]
-                phi_k = phi_features_batch[k - 1]
-                baseline_values = jnp.dot(phi_k, w_k)
+                w_n = control_variates_results["w"][n - 1]
+                phi_n = phi_features[n - 1]
+                l_n = jnp.dot(phi_n, w_n)
 
-            advantages = cost_V_batch[k] - baseline_values
+            diff_V_l = costs_V[n] - l_n
 
             def scale_grad(g, adv):
                 target_shape = (g.shape[0],) + (1,) * (g.ndim - 1)
                 return g * adv.reshape(target_shape)
 
-            weighted_grads = tree_map(
-                lambda g: scale_grad(g, advantages), raw_grads_batch[k]
-            )
+            weighted_grads = tree_map(lambda g: scale_grad(g, diff_V_l), grads_S[n])
 
             grads_sum = tree_map(lambda g: g.sum(axis=0), weighted_grads)
 
@@ -203,19 +330,47 @@ class PolicyGradient:
 
     @partial(jax.jit, static_argnums=0)
     def G_KL_run_per_trajectory(self, key, params_trees):
+        """
+        Per-trajectory contribution of the KL regularizer gradient.
+
+        Draws one trajectory from the true data model and accumulates the
+        gradients of the model log-probabilities evaluated along that true
+        trajectory for all times n.
+
+        Args:
+            key: PRNGKey for sampling the true trajectory.
+            params_trees: List of N+1 parameter pytrees.
+
+        Returns:
+            Tuple length N+1 of pytrees; entry n is the gradient w.r.t.
+            params_trees[n] for this single trajectory.
+        """
         z_traj, z_traj_prime = self.true_data_model.sample_true_trajectory(key)
         grads_all = [tree_map(jnp.zeros_like, p) for p in params_trees]
-        for k in range(self.N + 1):
-            grad_k = self.per_trajectory_joint_score(
-                k, z_traj, z_traj_prime, params_trees
+        for n in range(self.N + 1):
+            grad_n = self.per_trajectory_joint_score(
+                n, z_traj, z_traj_prime, params_trees
             )
-            grads_all[k] = tree_map(lambda a, b: a + b, grads_all[k], grad_k)
+            grads_all[n] = tree_map(lambda a, b: a + b, grads_all[n], grad_n)
 
         return tuple(grads_all)
 
     @partial(jax.jit, static_argnums=0)
     def G_KL(self, key, params_trees):
+        """
+        Compute batch-summed gradient of the KL regularizer.
 
+        Samples B true trajectories and sums their per-time gradients, applying
+        a factor of -2.
+
+        Args:
+            key: PRNGKey for sampling true trajectories.
+            params_trees: List of N+1 parameter pytrees.
+
+        Returns:
+            List length N+1 of pytrees, where entry n contains the batch-summed
+            KL gradient contribution for time n (already scaled by -2).
+        """
         keys = jax.random.split(key, self.B)
         result = jax.vmap(self.G_KL_run_per_trajectory, in_axes=(0, None))(
             keys, params_trees
@@ -226,20 +381,49 @@ class PolicyGradient:
         return grads_sum
 
     @partial(jax.jit, static_argnums=0)
-    def aggregate_g(self, key, params_trees):
+    def g(self, key, params_trees):
+        """
+        Full gradient estimator combining cost and KL terms.
+
+        Computes:
+            (1/B) * (G_val(key_model) - L) + (beta/B) * G_KL(key_true)
+        where G_val and G_KL each return batch-summed gradients. The result is
+        therefore a batch-averaged gradient per time n.
+
+        Args:
+            key: PRNGKey split into model and true-data keys.
+            params_trees: List of N+1 parameter pytrees.
+
+        Returns:
+            List length N+1 of pytrees containing the averaged gradient estimate
+            for times n = 0..N.
+        """
         key_model, key_true = jax.random.split(key)
-        g_val = self.G_val(key_model, params_trees)
-        g_kl = self.G_KL(key_true, params_trees)
+        G_val = self.G_val(
+            key_model, params_trees
+        )  # note that this is actually G_val-L
+        G_kl = self.G_KL(key_true, params_trees)
         # Scale by batch size and beta
         return [
             tree_map(
                 lambda gv, gk: (1 / self.B) * gv + (self.beta / self.B) * gk, gv, gk
             )
-            for gv, gk in zip(g_val, g_kl)
+            for gv, gk in zip(G_val, G_kl)
         ]
 
     @partial(jax.jit, static_argnums=0)
     def compute_updates(self, params_trees, grads_trees, lrate):
+        """
+        Apply element-wise clipped gradient descent updates to all parameter trees.
+
+        Args:
+            params_trees: List of N+1 parameter pytrees to be updated.
+            grads_trees: List of N+1 gradient pytrees aligned with params_trees.
+            lrate: Scalar learning rate.
+
+        Returns:
+            List of updated parameter pytrees, same structure as params_trees.
+        """
         clip_val = 1.0
         return [
             tree_map(
@@ -251,8 +435,18 @@ class PolicyGradient:
         ]
 
     def update_params(self, key):
+        """
+        One optimization step: estimate gradients and update model parameters in-place.
 
-        grads = self.aggregate_g(key, self.normalizing_flow_model.params_trees)
+        Splits the key, computes the full gradient estimate via `g`, applies
+        clipped gradient descent updates using the configured learning rate,
+        and writes the updated parameter trees back into the normalizing-flow model.
+
+        Args:
+            key: PRNGKey used for both model and true-data sampling.
+        """
+
+        grads = self.g(key, self.normalizing_flow_model.params_trees)
         updated_trees = self.compute_updates(
             self.normalizing_flow_model.params_trees, grads, self.lrate
         )
