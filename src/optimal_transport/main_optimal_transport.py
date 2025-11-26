@@ -12,7 +12,8 @@ import yaml
 from src.optimal_transport.utils_distance_metrics import (
     calculate_kld_OT,
     calculate_wass1_OT,
-    cost_function_OT,
+    cost_function_yz_OT,
+    cost_function_yyprime_OT,
     plot_comparison,
 )
 import jax
@@ -26,7 +27,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = True
+USE_WANDB = False
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 work_dir = os.path.join(project_root, "main_optimal_transport")
 os.makedirs(work_dir, exist_ok=True)
@@ -69,7 +70,10 @@ def main():
         (wass1_OT, wass1_OT_prime) = calculate_wass1_OT(
             policy_gradient, true_data_model, metrics_key
         )
-        cost_function = cost_function_OT(policy_gradient, true_data_model, metrics_key)
+        cost_function_yz = cost_function_yz_OT(
+            policy_gradient, true_data_model, metrics_key
+        )
+        cost_function_yyprime = cost_function_yyprime_OT(policy_gradient, metrics_key)
         if use_wandb:
             # Log all metrics at the current iteration step to create one row per loop
             writer.write_scalars(
@@ -79,7 +83,8 @@ def main():
                     "metrics/kld_OT_prime": float(kld_OT_prime),
                     "metrics/wass1_OT": float(wass1_OT),
                     "metrics/wass1_OT_prime": float(wass1_OT_prime),
-                    "metrics/cost_function": float(cost_function),
+                    "metrics/cost_function_yz": float(cost_function_yz),
+                    "metrics/cost_function_yyprime": float(cost_function_yyprime),
                 },
             )
 

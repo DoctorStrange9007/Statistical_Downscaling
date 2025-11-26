@@ -417,7 +417,7 @@ def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer)
         writer.write_images(images={"comparison_hist": out_path})
 
 
-def cost_function_OT(policy_gradient, true_data_model, key):
+def cost_function_yz_OT(policy_gradient, true_data_model, key):
     B = policy_gradient.run_sett["num_samples_metrics"]
     key_model, key_true = jax.random.split(key)
     keys_model = jax.random.split(key_model, B)
@@ -434,6 +434,19 @@ def cost_function_OT(policy_gradient, true_data_model, key):
     cost_function = (1 / 2) * jnp.sum((y_trajs - z_trajs) ** 2) + (1 / 2) * jnp.sum(
         (y_trajs_prime - z_trajs_prime) ** 2
     )
+    return cost_function
+
+
+def cost_function_yyprime_OT(policy_gradient, key):
+    B = policy_gradient.run_sett["num_samples_metrics"]
+    keys_model = jax.random.split(key, B)
+
+    params_trees = policy_gradient.normalizing_flow_model.params_trees
+    y_trajs, y_trajs_prime = jax.vmap(
+        policy_gradient.normalizing_flow_model.sample_trajectory, in_axes=(0, None)
+    )(keys_model, params_trees)
+
+    cost_function = (1 / 2) * jnp.sum((y_trajs - y_trajs_prime) ** 2)
     return cost_function
 
 

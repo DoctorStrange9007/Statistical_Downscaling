@@ -459,12 +459,29 @@ class NormalizingFlowModel:
     """
 
     def __init__(self, run_sett: dict):
+        """
+        Construct a family of RealNVP flows for joint state-action vectors.
+
+        This creates two Haiku-transformed callables for both the unconditional
+        (n = 0) and conditional (n >= 1) models:
+          - log_prob transforms, returning log probability densities
+          - sample transforms, returning RNG-driven samples
+
+        Settings pulled from run_sett:
+          - N: number of transitions (trajectory length is N+1)
+          - d_prime: per-variable dimension (y and y'); state_dim = 2 * d_prime
+          - num_layers: number of alternating masked-coupling layers
+          - hidden_size: width of the conditioner MLPs
+          - seed: PRNG seed used for parameter initialization
+
+        Args:
+            run_sett: Dictionary with fields described above.
+        """
         self.run_sett = run_sett
         self.N = self.run_sett["N"]
         self.d_prime = self.run_sett["d_prime"]
-        self.state_action_dim = 2 * self.d_prime
+        self.state_dim = 2 * self.d_prime
         self.num_layers = self.run_sett["num_layers"]
-        self.batch_size = self.run_sett["B"]
         self.hidden_size = self.run_sett["hidden_size"]
 
         self.unc_log_prob = hk.transform(lambda x: self._build_unc_dist().log_prob(x))
@@ -483,10 +500,23 @@ class NormalizingFlowModel:
         self.init_all_models(jax.random.PRNGKey(self.run_sett["seed"]))
 
     def _build_unc_dist(self):
-        """Internal: Builds the Unconditional Distribution (inside transform)."""
+        """
+        Build the unconditional flow distribution q0 over R^{state_dim}.
+
+        Architecture:
+          - Chain of `num_layers` RealNVP masked-coupling layers
+          - Alternating binary masks across layers
+          - Conditioner MLP produces per-dimension (shift, scale) parameters
+            with elementwise scale = exp(tanh(s_pre)) for stability
+          - Base distribution is standard multivariate normal (diag covariance)
+
+        Returns:
+            A `distrax.Transformed` distribution with methods `.log_prob(x)`
+            and `.sample(seed=...)` operating on vectors of shape (..., state_dim).
+        """
         layers = []
         for i in range(self.num_layers):
-            mask = jnp.arange(0, self.state_action_dim) % 2 == (i % 2)
+            mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
 
             def conditioner(x):
                 dummy_state = jnp.zeros_like(x)
@@ -501,11 +531,11 @@ class NormalizingFlowModel:
                         hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
                         hk.Linear(
-                            self.state_action_dim * 2,
+                            self.state_dim * 2,
                             w_init=jnp.zeros,
                             b_init=jnp.zeros,
                         ),
-                        hk.Reshape((self.state_action_dim, 2)),
+                        hk.Reshape((self.state_dim, 2)),
                     ]
                 )
                 params = mlp(model_input)
@@ -526,15 +556,30 @@ class NormalizingFlowModel:
                 )
             )
         base = distrax.MultivariateNormalDiag(
-            jnp.zeros(self.state_action_dim), jnp.ones(self.state_action_dim)
+            jnp.zeros(self.state_dim), jnp.ones(self.state_dim)
         )
         return distrax.Transformed(base, distrax.Chain(layers))
 
     def _build_cond_dist(self, prev_state):
-        """Internal: Builds the Conditional Distribution (inside transform)."""
+        """
+        Build the conditional flow distribution qn(· | prev_state).
+
+        Similar to `_build_unc_dist` but the conditioner takes the previous
+        state as additional input to produce per-dimension (shift, scale)
+        parameters conditioned on `prev_state`.
+
+        Args:
+            prev_state: Array with shape (..., state_dim). Acts as context and
+                is concatenated with the masked input inside the conditioner.
+
+        Returns:
+            A `distrax.Transformed` conditional distribution whose `.log_prob(x)`
+            and `.sample(seed=...)` use the captured `prev_state` context. Inputs
+            and outputs use vectors of shape (..., state_dim).
+        """
         layers = []
         for i in range(self.num_layers):
-            mask = jnp.arange(0, self.state_action_dim) % 2 == (i % 2)
+            mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
 
             def conditioner(x):
                 init = hk.initializers.VarianceScaling(
@@ -548,11 +593,11 @@ class NormalizingFlowModel:
                         hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
                         hk.Linear(
-                            self.state_action_dim * 2,
+                            self.state_dim * 2,
                             w_init=jnp.zeros,
                             b_init=jnp.zeros,
                         ),
-                        hk.Reshape((self.state_action_dim, 2)),
+                        hk.Reshape((self.state_dim, 2)),
                     ]
                 )
                 params = mlp(model_input)
@@ -574,39 +619,108 @@ class NormalizingFlowModel:
                 )
             )
         base = distrax.MultivariateNormalDiag(
-            jnp.zeros(self.state_action_dim), jnp.ones(self.state_action_dim)
+            jnp.zeros(self.state_dim), jnp.ones(self.state_dim)
         )
         return distrax.Transformed(base, distrax.Chain(layers))
 
     def init_all_models(self, master_rng):
         """
-        Initializes N+1 separate sets of parameters.
+        Initialize parameters for q0 and q1..qN and store them in `params_trees`.
+
+        Creates N+1 parameter pytrees by calling the `.init` of the transformed
+        Haiku functions:
+          - Index 0: parameters for the unconditional log_prob (q0)
+          - Indices 1..N: parameters for the conditional log_prob (qn)
+
+        Args:
+            master_rng: JAX PRNGKey used to split keys for each initialization.
+
+        Side effects:
+            Populates `self.params_trees` with a list of length N+1.
         """
 
-        dummy_state = jnp.zeros((1, self.state_action_dim))
-        dummy_action = jnp.zeros((1, self.state_action_dim))
+        dummy_state = jnp.zeros((1, self.state_dim))
+        dummy_action = jnp.zeros((1, self.state_dim))
 
-        for t in range(self.N + 1):
+        for n in range(self.N + 1):
             master_rng, init_key = jax.random.split(master_rng)
-            if t == 0:
+            if n == 0:
                 params = self.unc_log_prob.init(init_key, dummy_action)
             else:
                 params = self.cond_log_prob.init(init_key, dummy_action, dummy_state)
             self.params_trees.append(params)
 
     def log_prob_0(self, params, action):
+        """
+        Compute log q0(action) for the unconditional model.
+
+        Args:
+            params: Haiku parameter pytree for q0.
+            action: Array with shape (..., state_dim), the input vector.
+
+        Returns:
+            Array of log-probabilities with shape matching any leading batch dims.
+        """
         return self.unc_log_prob.apply(params, None, action)
 
     def log_prob_cond(self, params, action, state):
+        """
+        Compute log qn(action | state) for the conditional model.
+
+        Args:
+            params: Haiku parameter pytree for qn at some step n >= 1.
+            action: Array with shape (..., state_dim), the input vector.
+            state: Array with shape (..., state_dim), the conditioning vector
+                (typically concatenation of previous y and y').
+
+        Returns:
+            Array of log-probabilities with shape matching any leading batch dims.
+        """
         return self.cond_log_prob.apply(params, None, action, state)
 
     def _sample_0(self, params, key):
+        """
+        Sample a vector from the unconditional model q0.
+
+        Args:
+            params: Haiku parameter pytree for q0.
+            key: JAX PRNGKey used by the transformed sampler.
+
+        Returns:
+            Array with shape (state_dim,) or with leading batch dims if batched apply.
+        """
         return self.unc_sample.apply(params, key)
 
     def _sample_cond(self, params, key, state):
+        """
+        Sample a vector from the conditional model qn(· | state).
+
+        Args:
+            params: Haiku parameter pytree for qn at some step n >= 1.
+            key: JAX PRNGKey used by the transformed sampler.
+            state: Array with shape (..., state_dim), conditioning vector.
+
+        Returns:
+            Array with shape (state_dim,) or with leading batch dims if batched apply.
+        """
         return self.cond_sample.apply(params, key, state)
 
     def get_log_prob_grad(self, params, n, action, state=None):
+        """
+        Gradient of log-probability with respect to parameters at step n.
+
+        For n = 0, computes ∇_params log q0(action).
+        For n >= 1, computes ∇_params log qn(action | state).
+
+        Args:
+            params: Haiku parameter pytree for the relevant step.
+            n: Integer in [0, N], selects unconditional (0) or conditional (>=1).
+            action: Array with shape (..., state_dim), input vector.
+            state: Optional array with shape (..., state_dim), required if n >= 1.
+
+        Returns:
+            Pytree with the same structure as `params`, containing gradients.
+        """
 
         def forward_loss(p):
             if n == 0:
@@ -614,15 +728,30 @@ class NormalizingFlowModel:
             else:
                 log_prob = self.log_prob_cond(p, action, state)
 
-            return jnp.mean(log_prob)
+            return log_prob
 
         return jax.grad(forward_loss)(params)
 
     @partial(jax.jit, static_argnums=0)
     def sample_trajectory(self, key, params_trees):
         """
-        Sample an entire trajectory using the flow models.
-        Returns y_traj, y_traj_prime with shape (N+1, d_prime, 1).
+        Sample an entire (y, y') trajectory from q0 and q1..qN.
+
+        Process:
+          1) Sample joint0 ~ q0 to obtain (y0, y0')
+          2) For n = 1..N, sample joint_n ~ q_n(· | prev_state) where
+             prev_state = concat(y_{n-1}, y'_{n-1})
+          3) Return stacked arrays for y and y' with explicit singleton channel
+
+        Args:
+            key: PRNGKey for sequential sampling across time.
+            params_trees: List of N+1 Haiku parameter pytrees; index 0 for q0,
+                and indices 1..N for q1..qN.
+
+        Returns:
+            Tuple (y_traj, y_traj_prime):
+              - y_traj: Array with shape (N+1, d_prime, 1)
+              - y_traj_prime: Array with shape (N+1, d_prime, 1)
         """
         d = self.d_prime
         key, k0 = jax.random.split(key)
