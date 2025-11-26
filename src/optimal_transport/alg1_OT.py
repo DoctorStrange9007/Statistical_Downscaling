@@ -5,6 +5,7 @@ from jax.tree_util import tree_map, tree_reduce
 from functools import partial
 import haiku as hk
 import distrax
+import optax
 
 
 class PolicyGradient:
@@ -51,10 +52,17 @@ class PolicyGradient:
         self.true_data_model = true_data_model
         self.normalizing_flow_model = normalizing_flow_model
         self.B = self.run_sett["B"]
-        lr_sett = self.run_sett["lrates"]
-        self.lrate = float(
-            lr_sett[0] if isinstance(lr_sett, (list, tuple)) else lr_sett
+        self.lrate_schedule = optax.warmup_cosine_decay_schedule(
+            init_value=float(run_sett["optimizer"]["init_value"]),
+            peak_value=float(run_sett["optimizer"]["peak_value"]),
+            warmup_steps=int(run_sett["optimizer"]["warmup_steps"]),
+            decay_steps=int(run_sett["optimizer"]["decay_steps"]),
+            end_value=float(run_sett["optimizer"]["end_value"]),
         )
+        self.optimizer = optax.chain(
+            optax.clip(1.0), optax.adam(learning_rate=self.lrate_schedule)
+        )
+        self.opt_state = self.optimizer.init(self.normalizing_flow_model.params_trees)
         self.d_phi = 2 * self.d_prime + 1
 
     def _get_control_variate_features(
@@ -447,10 +455,13 @@ class PolicyGradient:
         """
 
         grads = self.g(key, self.normalizing_flow_model.params_trees)
-        updated_trees = self.compute_updates(
-            self.normalizing_flow_model.params_trees, grads, self.lrate
+
+        updates, self.opt_state = self.optimizer.update(
+            grads, self.opt_state, self.normalizing_flow_model.params_trees
         )
-        self.normalizing_flow_model.params_trees = updated_trees
+        self.normalizing_flow_model.params_trees = optax.apply_updates(
+            self.normalizing_flow_model.params_trees, updates
+        )
 
 
 class NormalizingFlowModel:
