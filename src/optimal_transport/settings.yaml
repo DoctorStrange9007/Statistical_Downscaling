@@ -1,5 +1,5 @@
 d_prime: 2
-beta: 100
+beta: 10
 N: 3
 B: 100
 num_samples_metrics: 1000

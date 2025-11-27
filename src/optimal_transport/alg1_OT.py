@@ -60,7 +60,8 @@ class PolicyGradient:
             end_value=float(run_sett["optimizer"]["end_value"]),
         )
         self.optimizer = optax.chain(
-            optax.clip(1.0), optax.adam(learning_rate=self.lrate_schedule)
+            optax.clip_by_global_norm(1.0),
+            optax.adam(learning_rate=self.lrate_schedule),
         )
         self.opt_state = self.optimizer.init(self.normalizing_flow_model.params_trees)
         self.d_phi = 2 * self.d_prime + 1
@@ -130,6 +131,9 @@ class PolicyGradient:
             grad_S_norm_sq_per_batch_stack,
             phi_features_stack,
         )
+        n_steps, d_phi, _ = A.shape
+        jitter_num_stab = 1e-6 * jnp.eye(d_phi)
+        A = A + jitter_num_stab[None, ...]
 
         # b = sum_b  (S V phi)
         b_vec = jnp.einsum(
@@ -417,29 +421,6 @@ class PolicyGradient:
                 lambda gv, gk: (1 / self.B) * gv + (self.beta / self.B) * gk, gv, gk
             )
             for gv, gk in zip(G_val, G_kl)
-        ]
-
-    @partial(jax.jit, static_argnums=0)
-    def compute_updates(self, params_trees, grads_trees, lrate):
-        """
-        Apply element-wise clipped gradient descent updates to all parameter trees.
-
-        Args:
-            params_trees: List of N+1 parameter pytrees to be updated.
-            grads_trees: List of N+1 gradient pytrees aligned with params_trees.
-            lrate: Scalar learning rate.
-
-        Returns:
-            List of updated parameter pytrees, same structure as params_trees.
-        """
-        clip_val = 1.0
-        return [
-            tree_map(
-                lambda p, g: p - lrate * jnp.clip(g, -clip_val, clip_val),
-                p_tree,
-                g_tree,
-            )
-            for p_tree, g_tree in zip(params_trees, grads_trees)
         ]
 
     def update_params(self, key):

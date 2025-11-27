@@ -27,7 +27,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = False
+USE_WANDB = True
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 work_dir = os.path.join(project_root, "main_optimal_transport")
 os.makedirs(work_dir, exist_ok=True)
