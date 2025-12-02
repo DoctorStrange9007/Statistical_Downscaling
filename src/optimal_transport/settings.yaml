@@ -1,7 +1,6 @@
 d_prime: 2
-beta: 10
 N: 3
-B: 100
+B: 64
 num_samples_metrics: 1000
 seed: 888
 num_iterations: 50000
@@ -13,3 +12,6 @@ optimizer:
   warmup_steps: 10000
   decay_steps: 40000
   end_value: 0.000001
+beta_schedule:
+  init_boundary_value: 0.1
+  end_boundary_value: 100.0

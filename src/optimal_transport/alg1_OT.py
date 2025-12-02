@@ -46,7 +46,6 @@ class PolicyGradient:
                 - sample_true_trajectory(key) -> (z_traj, z_traj_prime)
         """
         self.run_sett = run_sett  # Store the full run_sett
-        self.beta = self.run_sett["beta"]
         self.N = self.run_sett["N"]
         self.d_prime = self.run_sett["d_prime"]
         self.true_data_model = true_data_model
@@ -65,6 +64,27 @@ class PolicyGradient:
         )
         self.opt_state = self.optimizer.init(self.normalizing_flow_model.params_trees)
         self.d_phi = 2 * self.d_prime + 1
+
+        start_ramp_step = int(self.run_sett["num_iterations"] * 0.2)
+        end_ramp_step = int(self.run_sett["num_iterations"] * 0.8)
+        ramp_time = end_ramp_step - start_ramp_step
+        self.beta_schedule = optax.join_schedules(
+            schedules=[
+                optax.constant_schedule(
+                    self.run_sett["beta_schedule"]["init_boundary_value"]
+                ),
+                optax.linear_schedule(
+                    self.run_sett["beta_schedule"]["init_boundary_value"],
+                    self.run_sett["beta_schedule"]["end_boundary_value"],
+                    ramp_time,
+                ),
+                optax.constant_schedule(
+                    self.run_sett["beta_schedule"]["end_boundary_value"]
+                ),
+            ],
+            boundaries=[start_ramp_step, end_ramp_step],
+        )
+        self._step = 0
 
     def _get_control_variate_features(
         self, prev_y: jnp.ndarray, prev_yp: jnp.ndarray
@@ -87,8 +107,10 @@ class PolicyGradient:
         prev_y = jnp.squeeze(prev_y)
         prev_yp = jnp.squeeze(prev_yp)
 
-        # Feature vector: [1 (bias), y_n-1 (d_prime), y'_n-1 (d_prime)]
-        return jnp.concatenate([jnp.ones(1), prev_y, prev_yp])
+        linear = jnp.concatenate([prev_y, prev_yp])
+        quadratic = jnp.concatenate([prev_y**2, prev_yp**2, prev_y * prev_yp])
+
+        return jnp.concatenate([jnp.ones(1), linear, quadratic])
 
     def fit_control_variates(self, costs_V, grads_S_norm_sq_per_batch, phi_features):
         """
@@ -393,7 +415,7 @@ class PolicyGradient:
         return grads_sum
 
     @partial(jax.jit, static_argnums=0)
-    def g(self, key, params_trees):
+    def g(self, key, params_trees, beta_value):
         """
         Full gradient estimator combining cost and KL terms.
 
@@ -405,6 +427,7 @@ class PolicyGradient:
         Args:
             key: PRNGKey split into model and true-data keys.
             params_trees: List of N+1 parameter pytrees.
+            beta_value: Scalar beta used to scale the KL term at this step.
 
         Returns:
             List length N+1 of pytrees containing the averaged gradient estimate
@@ -418,7 +441,7 @@ class PolicyGradient:
         # Scale by batch size and beta
         return [
             tree_map(
-                lambda gv, gk: (1 / self.B) * gv + (self.beta / self.B) * gk, gv, gk
+                lambda gv, gk: (1 / self.B) * gv + (beta_value / self.B) * gk, gv, gk
             )
             for gv, gk in zip(G_val, G_kl)
         ]
@@ -435,7 +458,9 @@ class PolicyGradient:
             key: PRNGKey used for both model and true-data sampling.
         """
 
-        grads = self.g(key, self.normalizing_flow_model.params_trees)
+        beta_value = self.beta_schedule(self._step)
+        beta_value = 10000.0  # for testing
+        grads = self.g(key, self.normalizing_flow_model.params_trees, beta_value)
 
         updates, self.opt_state = self.optimizer.update(
             grads, self.opt_state, self.normalizing_flow_model.params_trees
@@ -443,6 +468,7 @@ class PolicyGradient:
         self.normalizing_flow_model.params_trees = optax.apply_updates(
             self.normalizing_flow_model.params_trees, updates
         )
+        self._step += 1
 
 
 class NormalizingFlowModel:
