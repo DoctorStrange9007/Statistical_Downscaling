@@ -498,6 +498,7 @@ class NormalizingFlowModel:
         self.run_sett = run_sett
         self.N = self.run_sett["N"]
         self.d_prime = self.run_sett["d_prime"]
+        self.num_bins = self.run_sett["num_bins"]
         self.state_dim = 2 * self.d_prime
         self.num_layers = self.run_sett["num_layers"]
         self.hidden_size = self.run_sett["hidden_size"]
@@ -535,6 +536,7 @@ class NormalizingFlowModel:
         layers = []
         for i in range(self.num_layers):
             mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
+            num_bins = self.num_bins
 
             def conditioner(x):
                 dummy_state = jnp.zeros_like(x)
@@ -549,26 +551,32 @@ class NormalizingFlowModel:
                         hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
                         hk.Linear(
-                            self.state_dim * 2,
+                            self.state_dim
+                            * (
+                                3 * num_bins + 1
+                            ),  # NSF (with linear throuws away 2 -> 3K-1)
                             w_init=jnp.zeros,
                             b_init=jnp.zeros,
                         ),
-                        hk.Reshape((self.state_dim, 2)),
+                        hk.Reshape(
+                            (self.state_dim, 3 * num_bins + 1)
+                        ),  # NSF (with linear throuws away 2 -> 3K-1)
                     ]
                 )
                 params = mlp(model_input)
-                shift = params[..., 0]
-                s_pre = params[..., 1]
 
-                scale = jnp.exp(jnp.tanh(s_pre))
-
-                return shift, scale
+                return params
 
             layers.append(
                 distrax.MaskedCoupling(
                     mask=mask,
-                    bijector=lambda params: distrax.ScalarAffine(
-                        shift=params[0], scale=params[1]
+                    bijector=lambda params: distrax.RationalQuadraticSpline(
+                        params,
+                        range_min=-4.0,
+                        range_max=4.0,
+                        boundary_slopes="identity",
+                        min_bin_size=1e-3,
+                        min_knot_slope=1e-3,
                     ),
                     conditioner=conditioner,
                 )
@@ -598,6 +606,7 @@ class NormalizingFlowModel:
         layers = []
         for i in range(self.num_layers):
             mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
+            num_bins = self.num_bins
 
             def conditioner(x):
                 init = hk.initializers.VarianceScaling(
@@ -611,27 +620,32 @@ class NormalizingFlowModel:
                         hk.Linear(self.hidden_size, w_init=init),
                         jax.nn.tanh,
                         hk.Linear(
-                            self.state_dim * 2,
+                            self.state_dim
+                            * (
+                                3 * num_bins + 1
+                            ),  # NSF (with linear throuws away 2 -> 3K-1)
                             w_init=jnp.zeros,
                             b_init=jnp.zeros,
                         ),
-                        hk.Reshape((self.state_dim, 2)),
+                        hk.Reshape(
+                            (self.state_dim, 3 * num_bins + 1)
+                        ),  # NSF (with linear throuws away 2 -> 3K-1)
                     ]
                 )
                 params = mlp(model_input)
 
-                shift = params[..., 0]
-                s_pre = params[..., 1]
-
-                scale = jnp.exp(jnp.tanh(s_pre))
-
-                return shift, scale
+                return params
 
             layers.append(
                 distrax.MaskedCoupling(
                     mask=mask,
-                    bijector=lambda params: distrax.ScalarAffine(
-                        shift=params[0], scale=params[1]
+                    bijector=lambda params: distrax.RationalQuadraticSpline(
+                        params,
+                        range_min=-4.0,
+                        range_max=4.0,
+                        boundary_slopes="identity",
+                        min_bin_size=1e-3,
+                        min_knot_slope=1e-3,
                     ),
                     conditioner=conditioner,
                 )

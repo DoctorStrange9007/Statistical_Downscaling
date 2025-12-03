@@ -27,7 +27,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = True
+USE_WANDB = False
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 work_dir = os.path.join(project_root, "main_optimal_transport")
 os.makedirs(work_dir, exist_ok=True)
@@ -63,7 +63,6 @@ def main():
         key_step = jax.random.fold_in(key_master, _)
         metrics_key = jax.random.fold_in(key_master, 1000000 + _)
         policy_gradient.update_params(key_step)
-        print(f"Iteration {_} completed")
         (kld_OT, kld_OT_prime) = calculate_kld_OT(
             policy_gradient, true_data_model, metrics_key
         )
