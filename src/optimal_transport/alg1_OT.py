@@ -140,7 +140,7 @@ class PolicyGradient:
         cost_V_0, grad_S_0 = costs_V[0], grads_S_norm_sq_per_batch[0]
 
         c_numerator = jnp.sum(cost_V_0 * grad_S_0)
-        c_optimal = c_numerator / jnp.sum(grad_S_0)
+        c_optimal = c_numerator / (jnp.sum(grad_S_0) + 1e-8)
 
         costs_V_stack = jnp.stack(costs_V[1:])
         grad_S_norm_sq_per_batch_stack = jnp.stack(grads_S_norm_sq_per_batch[1:])
@@ -459,7 +459,6 @@ class PolicyGradient:
         """
 
         beta_value = self.beta_schedule(self._step)
-        beta_value = 10000.0  # for testing
         grads = self.g(key, self.normalizing_flow_model.params_trees, beta_value)
 
         updates, self.opt_state = self.optimizer.update(
@@ -572,8 +571,8 @@ class NormalizingFlowModel:
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-4.0,
-                        range_max=4.0,
+                        range_min=-6.0,
+                        range_max=6.0,
                         boundary_slopes="identity",
                         min_bin_size=1e-3,
                         min_knot_slope=1e-3,
@@ -641,8 +640,8 @@ class NormalizingFlowModel:
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-4.0,
-                        range_max=4.0,
+                        range_min=-6.0,
+                        range_max=6.0,
                         boundary_slopes="identity",
                         min_bin_size=1e-3,
                         min_knot_slope=1e-3,

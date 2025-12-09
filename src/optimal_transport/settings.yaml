@@ -14,5 +14,5 @@ optimizer:
   decay_steps: 40000
   end_value: 0.000001
 beta_schedule:
-  init_boundary_value: 0.1
+  init_boundary_value: 100.0
   end_boundary_value: 1000000.0
