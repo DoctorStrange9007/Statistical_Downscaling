@@ -63,6 +63,7 @@ class PolicyGradient:
             optax.adam(learning_rate=self.lrate_schedule),
         )
         self.opt_state = self.optimizer.init(self.normalizing_flow_model.params_trees)
+        self.d_phi = 2 * self.d_prime + 1
 
         start_ramp_step = int(self.run_sett["num_iterations"] * 0.2)
         end_ramp_step = int(self.run_sett["num_iterations"] * 0.8)
@@ -99,8 +100,8 @@ class PolicyGradient:
             prev_yp: Array with shape (d_prime, 1) or (d_prime,), previous y'.
 
         Returns:
-            Array with shape (1 + 5 * d_prime,), the feature vector
-            concat([1, prev_y, prev_yp, prev_y**2, prev_yp**2, prev_y * prev_yp]).
+            Array with shape (2 * d_prime + 1,), the feature vector
+            [1, prev_y, prev_yp].
         """
 
         prev_y = jnp.squeeze(prev_y)
@@ -128,7 +129,7 @@ class PolicyGradient:
                 the score (gradient of log-prob) at time n.
             phi_features: Sequence of length N. Each entry is an array with shape
                 (B, d_phi) containing features for n = 1..N, where
-                d_phi = 1 + 5 * d_prime.
+                d_phi = 2 * d_prime + 1.
 
         Returns:
             Dict with:
@@ -139,7 +140,7 @@ class PolicyGradient:
         cost_V_0, grad_S_0 = costs_V[0], grads_S_norm_sq_per_batch[0]
 
         c_numerator = jnp.sum(cost_V_0 * grad_S_0)
-        c_optimal = c_numerator / (jnp.sum(grad_S_0) + 1e-8)
+        c_optimal = c_numerator / jnp.sum(grad_S_0)
 
         costs_V_stack = jnp.stack(costs_V[1:])
         grad_S_norm_sq_per_batch_stack = jnp.stack(grads_S_norm_sq_per_batch[1:])
@@ -516,9 +517,7 @@ class NormalizingFlowModel:
         )
 
         self.params_trees = []
-        self.mu, self.sig = self._calibrate(
-            true_data_model
-        )  # mu and sig of shape N+1 x state_dim -- mu[n] gives mean of y and y' at time n etc.
+        self.mu, self.sig = self._calibrate(true_data_model)
         self.init_all_models(jax.random.PRNGKey(self.run_sett["seed"]))
 
     def _calibrate(self, true_data_model):
@@ -544,9 +543,6 @@ class NormalizingFlowModel:
           - Conditioner MLP produces per-dimension (shift, scale) parameters
             with elementwise scale = exp(tanh(s_pre)) for stability
           - Base distribution is standard multivariate normal (diag covariance)
-
-        Args:
-          - n: int, the time step.
 
         Returns:
             A `distrax.Transformed` distribution with methods `.log_prob(x)`
@@ -591,8 +587,8 @@ class NormalizingFlowModel:
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-6.0,
-                        range_max=6.0,
+                        range_min=-4.0,
+                        range_max=4.0,
                         boundary_slopes="identity",
                         min_bin_size=1e-3,
                         min_knot_slope=1e-3,
@@ -600,7 +596,7 @@ class NormalizingFlowModel:
                     conditioner=conditioner,
                 )
             )
-
+        # De-normalize back to data space: sig[n] * x + mu[n]
         mu_n = self.mu[n]
         sig_n = self.sig[n]
         layers.append(
@@ -625,7 +621,6 @@ class NormalizingFlowModel:
         Args:
             prev_state: Array with shape (..., state_dim). Acts as context and
                 is concatenated with the masked input inside the conditioner.
-            n: int, the time step.
 
         Returns:
             A `distrax.Transformed` conditional distribution whose `.log_prob(x)`
@@ -635,9 +630,7 @@ class NormalizingFlowModel:
         layers = []
         mu_prev = self.mu[n - 1]
         sig_prev = self.sig[n - 1]
-        prev_state_norm = (
-            prev_state - mu_prev
-        ) / sig_prev  # as these are additional inputs to the conditioner, we need to normalize them explicitly
+        prev_state_norm = (prev_state - mu_prev) / sig_prev
         for i in range(self.num_layers):
             mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
             num_bins = self.num_bins
@@ -675,8 +668,8 @@ class NormalizingFlowModel:
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-6.0,
-                        range_max=6.0,
+                        range_min=-4.0,
+                        range_max=4.0,
                         boundary_slopes="identity",
                         min_bin_size=1e-3,
                         min_knot_slope=1e-3,
@@ -684,7 +677,7 @@ class NormalizingFlowModel:
                     conditioner=conditioner,
                 )
             )
-
+        # De-normalize action back to data space for step n
         mu_n = self.mu[n]
         sig_n = self.sig[n]
         layers.append(
@@ -747,7 +740,7 @@ class NormalizingFlowModel:
             action: Array with shape (..., state_dim), the input vector.
             state: Array with shape (..., state_dim), the conditioning vector
                 (typically concatenation of previous y and y').
-            n: int, the time step.
+            n: Integer step index selecting per-time normalization.
 
         Returns:
             Array of log-probabilities with shape matching any leading batch dims.
@@ -775,7 +768,7 @@ class NormalizingFlowModel:
             params: Haiku parameter pytree for qn at some step n >= 1.
             key: JAX PRNGKey used by the transformed sampler.
             state: Array with shape (..., state_dim), conditioning vector.
-            n: int, the time step.
+            n: Integer step in [1..N].
 
         Returns:
             Array with shape (state_dim,) or with leading batch dims if batched apply.

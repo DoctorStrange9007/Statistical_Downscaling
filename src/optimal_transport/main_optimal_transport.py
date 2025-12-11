@@ -51,7 +51,7 @@ if use_wandb:
 
 def main():
     true_data_model = TrueDataModel(run_sett)
-    normalizing_flow_model = NormalizingFlowModel(run_sett)
+    normalizing_flow_model = NormalizingFlowModel(run_sett, true_data_model)
     policy_gradient = PolicyGradient(
         run_sett,
         normalizing_flow_model=normalizing_flow_model,
