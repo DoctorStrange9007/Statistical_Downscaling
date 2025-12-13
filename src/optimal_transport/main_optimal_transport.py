@@ -86,15 +86,15 @@ def main():
                     "metrics/cost_function_yyprime": float(cost_function_yyprime),
                 },
             )
-
-    plot_comparison(
-        n=1,
-        dims=2,
-        policy_gradient=policy_gradient,
-        true_data_model=true_data_model,
-        run_sett=run_sett,
-        writer=writer,
-    )
+    for n in range(4):
+        plot_comparison(
+            n=n,
+            dims=2,
+            policy_gradient=policy_gradient,
+            true_data_model=true_data_model,
+            run_sett=run_sett,
+            writer=writer,
+        )
     # Flush/close the writer once
     try:
         writer.flush()
