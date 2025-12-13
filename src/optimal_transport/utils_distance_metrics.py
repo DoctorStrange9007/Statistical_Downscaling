@@ -411,10 +411,12 @@ def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer)
         final_step = int(run_sett.get("num_iterations", 1)) - 1
         if hasattr(writer, "set_step"):
             writer.set_step(final_step)
-        writer.write_images(images={"comparison_hist": out_path}, step=final_step)
+        writer.write_images(
+            images={"comparison_hist" + str(n): out_path}, step=final_step
+        )
     except Exception:
         # Fallback without explicit step
-        writer.write_images(images={"comparison_hist": out_path})
+        writer.write_images(images={"comparison_hist" + str(n): out_path})
 
 
 def cost_function_yz_OT(policy_gradient, true_data_model, key):
