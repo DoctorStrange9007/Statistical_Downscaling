@@ -1,8 +1,8 @@
 d_prime: 2
 N: 3
 B: 64
-num_bins: 8
-num_samples_metrics: 1000
+num_bins: 100
+num_samples_metrics: 100000
 seed: 888
 num_iterations: 50000
 hidden_size: 128
@@ -14,5 +14,6 @@ optimizer:
   decay_steps: 40000
   end_value: 0.000001
 beta_schedule:
+  type: "constant"
   init_boundary_value: 100.0
   end_boundary_value: 1000000.0
