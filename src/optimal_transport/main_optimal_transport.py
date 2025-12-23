@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from src.optimal_transport.alg1_OT import (
     PolicyGradient,
     NormalizingFlowModel,
-    TrueDataModel,
+    TrueDataModelUnimodal,
 )
 import argparse
 import yaml
@@ -15,6 +15,9 @@ from src.optimal_transport.utils_distance_metrics import (
     cost_function_yz_OT,
     cost_function_yyprime_OT,
     plot_comparison,
+    calculate_ac_flow,
+    calculate_ac_true,
+    plot_acfs,
 )
 import jax
 from clu import metric_writers
@@ -50,7 +53,7 @@ if use_wandb:
 
 
 def main():
-    true_data_model = TrueDataModel(run_sett)
+    true_data_model = TrueDataModelUnimodal(run_sett)
     normalizing_flow_model = NormalizingFlowModel(run_sett, true_data_model)
     policy_gradient = PolicyGradient(
         run_sett,
@@ -73,6 +76,7 @@ def main():
             policy_gradient, true_data_model, metrics_key
         )
         cost_function_yyprime = cost_function_yyprime_OT(policy_gradient, metrics_key)
+
         if use_wandb:
             # Log all metrics at the current iteration step to create one row per loop
             writer.write_scalars(
@@ -86,15 +90,19 @@ def main():
                     "metrics/cost_function_yyprime": float(cost_function_yyprime),
                 },
             )
-    for n in range(4):
+    for n in range(int(run_sett["N"] + 1)):
         plot_comparison(
             n=n,
-            dims=2,
+            dims=int(run_sett["d_prime"]),
             policy_gradient=policy_gradient,
             true_data_model=true_data_model,
             run_sett=run_sett,
             writer=writer,
         )
+
+    ac_flow, ac_flow_prime = calculate_ac_flow(policy_gradient, metrics_key)
+    ac_true, ac_true_prime = calculate_ac_true(true_data_model, run_sett, metrics_key)
+    plot_acfs(ac_flow, ac_flow_prime, ac_true, ac_true_prime, run_sett, writer)
     # Flush/close the writer once
     try:
         writer.flush()
