@@ -67,22 +67,27 @@ class PolicyGradient:
         start_ramp_step = int(self.run_sett["num_iterations"] * 0.2)
         end_ramp_step = int(self.run_sett["num_iterations"] * 0.8)
         ramp_time = end_ramp_step - start_ramp_step
-        self.beta_schedule = optax.join_schedules(
-            schedules=[
-                optax.constant_schedule(
-                    self.run_sett["beta_schedule"]["init_boundary_value"]
-                ),
-                optax.linear_schedule(
-                    self.run_sett["beta_schedule"]["init_boundary_value"],
-                    self.run_sett["beta_schedule"]["end_boundary_value"],
-                    ramp_time,
-                ),
-                optax.constant_schedule(
-                    self.run_sett["beta_schedule"]["end_boundary_value"]
-                ),
-            ],
-            boundaries=[start_ramp_step, end_ramp_step],
-        )
+        if self.run_sett["beta_schedule"]["type"] == "constant":
+            self.beta_schedule = optax.constant_schedule(
+                self.run_sett["beta_schedule"]["end_boundary_value"]
+            )
+        elif self.run_sett["beta_schedule"]["type"] == "schedule":
+            self.beta_schedule = optax.join_schedules(
+                schedules=[
+                    optax.constant_schedule(
+                        self.run_sett["beta_schedule"]["init_boundary_value"]
+                    ),
+                    optax.linear_schedule(
+                        self.run_sett["beta_schedule"]["init_boundary_value"],
+                        self.run_sett["beta_schedule"]["end_boundary_value"],
+                        ramp_time,
+                    ),
+                    optax.constant_schedule(
+                        self.run_sett["beta_schedule"]["end_boundary_value"]
+                    ),
+                ],
+                boundaries=[start_ramp_step, end_ramp_step],
+            )
         self._step = 0
 
     def _get_control_variate_features(
@@ -857,68 +862,89 @@ class NormalizingFlowModel:
         return y_traj, y_traj_prime
 
 
-class TrueDataModel:
+class TrueDataModelUnimodal:
     """
-    Implements a true data model for statistical downscaling.
+    Implements a true data model for statistical downscaling with a unimodal distribution.
     """
 
     def __init__(self, run_sett: dict):
-        """
-        Initialize the TrueDataModel object.
-        """
-        self.run_sett = run_sett
-        self.N = self.run_sett["N"]
-        self.d_prime = self.run_sett["d_prime"]
+        self.N = run_sett["N"]
+        self.d_prime = run_sett["d_prime"]
+        self.base_means = jnp.linspace(-2, 2, self.d_prime).reshape(self.d_prime, 1)
+
+    def _step_dist(self, k, prev_val):
+        k_y, k_yp = jax.random.split(k)
+
+        noise_y = jax.random.normal(k_y, shape=(self.d_prime, 1)) * 0.5
+
+        raw_beta = jax.random.beta(k_yp, a=2.0, b=5.0, shape=(self.d_prime, 1))
+        noise_yp = (raw_beta * 4.0) - 1.5
+        # noise_yp = jax.random.t(k_yp, df=10, shape=(self.d_prime, 1)) * 0.5
+
+        noise = jnp.concatenate([noise_y, noise_yp], axis=1)
+
+        return self.base_means + 0.5 * prev_val + noise
 
     @partial(jax.jit, static_argnums=0)
     def sample_true_trajectory(self, key):
-        """
-        Pure, key-driven sampler for the true trajectory (JAX-friendly), where
-        the component means depend on the previous observation.
-        Returns (y_traj, y_traj_prime) with shape (N+1, d_prime, 1).
-        """
-        d = self.d_prime
-        N = self.N
-        K = d  # number of mixture components
-        scales = 0.5 * jnp.ones((d,))
-        weights = jnp.ones((K,)) / float(K)
+        key, k0 = jax.random.split(key)
 
-        # Per-step GMM sampler with dynamic means/stds
-        def _sample_gmm_key(k, means, stds, weights):
-            k1, k2 = jax.random.split(k)
-            comp = jax.random.categorical(k1, jnp.log(weights))
-            mean = means[comp]  # (d,)
-            std = stds[comp]  # (d,)
-            z = jax.random.normal(k2, shape=(d,))
-            return (mean + std * z).reshape((d, 1))
+        val0 = self._step_dist(k0, jnp.zeros((self.d_prime, 2)))
 
-        # Initial previous observations set to zeros
-        key, ky0, ky0p = jax.random.split(key, 3)
-        prev = jnp.zeros((d, 1))
-        base_means = jnp.stack(
-            [jnp.linspace(-2, 2, d) for _ in range(K)]
-        )  # Shape (K, d)
-        means_y0 = base_means + prev.reshape(1, d) * 0.5
-        stds_y0 = jnp.repeat(scales[None, :], K, axis=0)
-        y0 = _sample_gmm_key(ky0, means_y0, stds_y0, weights)
+        def step(carry, k):
+            next_val = self._step_dist(k, carry)
+            return next_val, next_val
 
-        means_y0p = base_means + prev.reshape(1, d) * 0.5
-        stds_y0p = jnp.repeat(scales[None, :], K, axis=0)
-        y0p = _sample_gmm_key(ky0p, means_y0p, stds_y0p, weights)
+        keys = jax.random.split(key, self.N)
+        _, vals = jax.lax.scan(step, val0, keys)
 
-        def step(carry, k_in):
-            prev_y, prev_yp, key_c = carry
-            key_c, ky, kyp = jax.random.split(key_c, 3)
-            means_y = base_means + 0.8 * prev_y.reshape(1, d)
-            stds_y = jnp.repeat(scales[None, :], K, axis=0)
-            y = _sample_gmm_key(ky, means_y, stds_y, weights)
-            means_yp = base_means + 0.8 * prev_yp.reshape(1, d)
-            stds_yp = jnp.repeat(scales[None, :], K, axis=0)
-            yp = _sample_gmm_key(kyp, means_yp, stds_yp, weights)
-            return (y, yp, key_c), (y, yp)
+        traj = jnp.concatenate([val0[None, ...], vals], axis=0)
 
-        keys = jax.random.split(key, N)
-        (_, _, _), (ys, yps) = lax.scan(step, (y0, y0p, key), xs=keys)
-        y_traj = jnp.concatenate([y0[None, ...], ys], axis=0)  # (N+1, d, 1)
-        y_traj_prime = jnp.concatenate([y0p[None, ...], yps], axis=0)  # (N+1, d, 1)
-        return y_traj, y_traj_prime
+        return traj[..., 0:1], traj[..., 1:2]
+
+
+class TrueDataModelBimodal:
+    """
+    Implements a true data model for statistical downscaling with a bimodal distribution.
+    """
+
+    def __init__(self, run_sett: dict):
+        self.N = run_sett["N"]
+        self.d_prime = run_sett["d_prime"]
+        self.base_means = jnp.linspace(-0.5, 0.0, self.d_prime).reshape(self.d_prime, 1)
+
+    def _step_dist(self, k, prev_val, selector):
+        k_y_l, k_y_r, k_yp_l, k_yp_r = jax.random.split(k, 4)
+
+        y_left = (jax.random.beta(k_y_l, 2.0, 5.0, shape=(self.d_prime, 1)) * 2.5) - 2.5
+        y_right = jax.random.normal(k_y_r, shape=(self.d_prime, 1)) * 0.5 + 1.5
+
+        yp_left = jax.random.normal(k_yp_l, shape=(self.d_prime, 1)) * 0.5 - 1.5
+        yp_right = (
+            jax.random.beta(k_yp_r, 5.0, 2.0, shape=(self.d_prime, 1)) * 2.5
+        ) + 0.5
+
+        noise_y = jnp.where(selector[:, 0:1], y_right, y_left)
+        noise_yp = jnp.where(selector[:, 1:2], yp_right, yp_left)
+
+        noise = jnp.concatenate([noise_y, noise_yp], axis=1)
+        return self.base_means + 0.5 * prev_val + noise
+
+    @partial(jax.jit, static_argnums=0)
+    def sample_true_trajectory(self, key):
+        key, k_sel, k0 = jax.random.split(key, 3)
+
+        selector = jax.random.bernoulli(k_sel, p=0.5, shape=(self.d_prime, 2))
+
+        val0 = self._step_dist(k0, jnp.zeros((self.d_prime, 2)), selector)
+
+        def step(carry, k):
+            prev_val, sel = carry
+            next_val = self._step_dist(k, prev_val, sel)
+            return (next_val, sel), next_val
+
+        keys = jax.random.split(key, self.N)
+        _, vals = jax.lax.scan(step, (val0, selector), keys)
+
+        traj = jnp.concatenate([val0[None, ...], vals], axis=0)
+        return traj[..., 0:1], traj[..., 1:2]
