@@ -309,15 +309,13 @@ def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer)
     - Col 1: y' (True vs Flow)
     """
     # 1. Setup keys and batch size
-    num_bins = 100
+    num_bins = run_sett["num_bins"]
     key = jax.random.PRNGKey(int(run_sett["seed"]))
     B_plot = int(run_sett["num_samples_metrics"])
     keys = jax.random.split(key, B_plot)
 
     params_trees = policy_gradient.normalizing_flow_model.params_trees
 
-    # 2. Batch-generate trajectories (Capture both y and y_prime)
-    # Shape: [Batch, Time, Dim, 1]
     true_y, true_y_prime = jax.vmap(
         true_data_model.sample_true_trajectory, in_axes=(0,)
     )(keys)
@@ -325,8 +323,6 @@ def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer)
         policy_gradient.normalizing_flow_model.sample_trajectory, in_axes=(0, None)
     )(keys, params_trees)
 
-    # 3. Extract specific time step n and move to host
-    # We slice [:, n, :, 0] to get shape [Batch, Dim]
     t_y_n = jnp.array(true_y[:, n, :, 0])
     f_y_n = jnp.array(flow_y[:, n, :, 0])
 
@@ -461,3 +457,169 @@ def plot_distance_metrics(
     plt.plot(wass1_OT_prime_history, label="Wass1 OT Prime")
     plt.legend()
     plt.show()
+
+
+def calculate_ac_flow(policy_gradient, key):
+    B = policy_gradient.run_sett["num_samples_metrics"]
+    keys_model = jax.random.split(key, B)
+    params_trees = policy_gradient.normalizing_flow_model.params_trees
+    y_trajs, y_trajs_prime = jax.vmap(
+        policy_gradient.normalizing_flow_model.sample_trajectory, in_axes=(0, None)
+    )(keys_model, params_trees)
+    B, T, D, _ = y_trajs.shape
+    acf_per_dim = []
+    acf_per_dim_prime = []
+
+    for d in range(D):
+        dim_data = y_trajs[:, :, d]
+        dim_data = dim_data - dim_data.mean(axis=0)
+
+        dim_data_prime = y_trajs_prime[:, :, d]
+        dim_data_prime = dim_data_prime - dim_data_prime.mean(axis=0)
+
+        dim_acf = []
+        dim_acf_prime = []
+        for lag in range(T):
+            if lag == 0:
+                dim_acf.append(1.0)
+                dim_acf_prime.append(1.0)
+            else:
+                y_t = dim_data[:, lag:].flatten()
+                y_t_lag = dim_data[:, :-lag].flatten()
+
+                y_t_prime = dim_data_prime[:, lag:].flatten()
+                y_t_lag_prime = dim_data_prime[:, :-lag].flatten()
+
+                dim_acf.append(jnp.corrcoef(y_t, y_t_lag)[0, 1])
+                dim_acf_prime.append(jnp.corrcoef(y_t_prime, y_t_lag_prime)[0, 1])
+        acf_per_dim.append(dim_acf)
+        acf_per_dim_prime.append(dim_acf_prime)
+
+    acf_per_dim = jnp.mean(jnp.array(acf_per_dim), axis=0)
+    acf_per_dim_prime = jnp.mean(jnp.array(acf_per_dim_prime), axis=0)
+    return acf_per_dim, acf_per_dim_prime
+
+
+def calculate_ac_true(true_data_model, run_sett, key):
+    B = run_sett["num_samples_metrics"]
+    keys_true = jax.random.split(key, B)
+    true_y, true_y_prime = jax.vmap(
+        true_data_model.sample_true_trajectory, in_axes=(0,)
+    )(keys_true)
+    B, T, D, _ = true_y.shape
+    acf_per_dim = []
+    acf_per_dim_prime = []
+    for d in range(D):
+        dim_data = true_y[:, :, d]
+        dim_data = dim_data - dim_data.mean(axis=0)
+
+        dim_data_prime = true_y_prime[:, :, d]
+        dim_data_prime = dim_data_prime - dim_data_prime.mean(axis=0)
+
+        dim_acf = []
+        dim_acf_prime = []
+        for lag in range(T):
+            if lag == 0:
+                dim_acf.append(1.0)
+                dim_acf_prime.append(1.0)
+            else:
+                y_t = dim_data[:, lag:].flatten()
+                y_t_lag = dim_data[:, :-lag].flatten()
+
+                y_t_prime = dim_data_prime[:, lag:].flatten()
+                y_t_lag_prime = dim_data_prime[:, :-lag].flatten()
+
+                dim_acf.append(jnp.corrcoef(y_t, y_t_lag)[0, 1])
+                dim_acf_prime.append(jnp.corrcoef(y_t_prime, y_t_lag_prime)[0, 1])
+        acf_per_dim.append(dim_acf)
+        acf_per_dim_prime.append(dim_acf_prime)
+    acf_per_dim = jnp.mean(jnp.array(acf_per_dim), axis=0)
+    acf_per_dim_prime = jnp.mean(jnp.array(acf_per_dim_prime), axis=0)
+    return acf_per_dim, acf_per_dim_prime
+
+
+def plot_acfs(
+    acf_per_dim,
+    acf_per_dim_prime,
+    acf_true_per_dim,
+    acf_true_per_dim_prime,
+    run_sett,
+    writer,
+):
+    """
+    Plots autocorrelation functions for a set of lags, both for flow-generated data (acf_per_dim)
+    and for true data samples (acf_per_dim_prime).
+
+    Args:
+        acf_per_dim (array): 1D array of ACF values for each lag (e.g., from the flow/approximate model).
+        acf_per_dim_prime (array): 1D array of ACF values for each lag (e.g., from the true model).
+        acf_true_per_dim (array): 1D array of ACF values for each lag (e.g., from the true model).
+        acf_true_per_dim_prime (array): 1D array of ACF values for each lag (e.g., from the true model).
+    """
+
+    acf_per_dim = jnp.array(acf_per_dim)
+    acf_per_dim_prime = jnp.array(acf_per_dim_prime)
+
+    acf_true_per_dim = jnp.array(acf_true_per_dim)
+    acf_true_per_dim_prime = jnp.array(acf_true_per_dim_prime)
+
+    lags = jnp.arange(len(acf_per_dim))
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        lags,
+        acf_per_dim,
+        marker="o",
+        linestyle="-",
+        label="Flow/Model ACF",
+        color="tab:blue",
+    )
+    plt.plot(
+        lags,
+        acf_per_dim_prime,
+        marker="s",
+        linestyle="--",
+        label="Flow/Model prime ACF",
+        color="tab:orange",
+    )
+
+    plt.plot(
+        lags,
+        acf_true_per_dim,
+        marker="o",
+        linestyle="-",
+        label="True Data ACF",
+        color="tab:pink",
+    )
+    plt.plot(
+        lags,
+        acf_true_per_dim_prime,
+        marker="s",
+        linestyle="--",
+        label="True prime Data ACF",
+        color="tab:purple",
+    )
+
+    plt.title("Autocorrelation Function (ACF) Comparison")
+    plt.xlabel("Lag")
+    plt.ylabel("ACF")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend()
+    plt.tight_layout()
+
+    out_dir = os.path.join(os.getcwd(), "acf")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(
+        out_dir,
+        f"acf_comparison.png",
+    )
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    try:
+        final_step = int(run_sett.get("num_iterations", 1)) - 1
+        if hasattr(writer, "set_step"):
+            writer.set_step(final_step)
+        writer.write_images(images={"acf_comparison": out_path}, step=final_step)
+    except Exception:
+        writer.write_images(images={"acf_comparison": out_path})
