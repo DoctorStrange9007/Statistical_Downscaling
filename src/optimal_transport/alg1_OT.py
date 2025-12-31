@@ -539,6 +539,30 @@ class NormalizingFlowModel:
 
         return mu, sig
 
+    def _shared_conditioner(self, x, context, init):
+        # Needed to be identical for all n for lax.scan to work, for n=0 context just zeros for it to make sense mathematically
+        model_input = jnp.concatenate([x, context], axis=-1)
+
+        h = hk.Sequential(
+            [
+                hk.Linear(self.hidden_size, w_init=init),
+                jax.nn.tanh,
+                hk.Linear(self.hidden_size, w_init=init),
+                jax.nn.tanh,
+            ]
+        )(model_input)
+
+        skip_connection = hk.Linear(self.hidden_size, w_init=init)(model_input)
+        h_combined = h + skip_connection
+
+        output_layer = hk.Linear(
+            self.state_dim
+            * (3 * self.num_bins + 1),  # NSF (with linear throws away 2 -> 3K-1)
+            w_init=jnp.zeros,
+            b_init=jnp.zeros,
+        )
+        return output_layer(h_combined)
+
     def _build_unc_dist(self, n: int):
         """
         Build the unconditional flow distribution q0 over R^{state_dim}.
@@ -567,37 +591,19 @@ class NormalizingFlowModel:
                 init = hk.initializers.VarianceScaling(
                     scale=1.0, mode="fan_avg", distribution="uniform"
                 )
-                model_input = jnp.concatenate([x, dummy_state], axis=-1)
-                mlp = hk.Sequential(
-                    [
-                        hk.Linear(self.hidden_size, w_init=init),
-                        jax.nn.tanh,
-                        hk.Linear(self.hidden_size, w_init=init),
-                        jax.nn.tanh,
-                        hk.Linear(
-                            self.state_dim
-                            * (
-                                3 * num_bins + 1
-                            ),  # NSF (with linear throuws away 2 -> 3K-1)
-                            w_init=jnp.zeros,
-                            b_init=jnp.zeros,
-                        ),
-                        hk.Reshape(
-                            (self.state_dim, 3 * num_bins + 1)
-                        ),  # NSF (with linear throuws away 2 -> 3K-1)
-                    ]
-                )
-                params = mlp(model_input)
+                params = self._shared_conditioner(x, dummy_state, init)
 
-                return params
+                return hk.Reshape((self.state_dim, 3 * num_bins + 1))(
+                    params
+                )  # NSF (with linear throuws away 2 -> 3K-1)
 
             layers.append(
                 distrax.MaskedCoupling(
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-6.0,
-                        range_max=6.0,
+                        range_min=-4.0,
+                        range_max=4.0,
                         boundary_slopes="identity",
                         min_bin_size=1e-3,
                         min_knot_slope=1e-3,
@@ -651,37 +657,19 @@ class NormalizingFlowModel:
                 init = hk.initializers.VarianceScaling(
                     scale=1.0, mode="fan_avg", distribution="uniform"
                 )
-                model_input = jnp.concatenate([x, prev_state_norm], axis=-1)
-                mlp = hk.Sequential(
-                    [
-                        hk.Linear(self.hidden_size, w_init=init),
-                        jax.nn.tanh,
-                        hk.Linear(self.hidden_size, w_init=init),
-                        jax.nn.tanh,
-                        hk.Linear(
-                            self.state_dim
-                            * (
-                                3 * num_bins + 1
-                            ),  # NSF (with linear throuws away 2 -> 3K-1)
-                            w_init=jnp.zeros,
-                            b_init=jnp.zeros,
-                        ),
-                        hk.Reshape(
-                            (self.state_dim, 3 * num_bins + 1)
-                        ),  # NSF (with linear throuws away 2 -> 3K-1)
-                    ]
-                )
-                params = mlp(model_input)
+                params = self._shared_conditioner(x, prev_state_norm, init)
 
-                return params
+                return hk.Reshape((self.state_dim, 3 * num_bins + 1))(
+                    params
+                )  # NSF (with linear throuws away 2 -> 3K-1)
 
             layers.append(
                 distrax.MaskedCoupling(
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-6.0,
-                        range_max=6.0,
+                        range_min=-4.0,
+                        range_max=4.0,
                         boundary_slopes="identity",
                         min_bin_size=1e-3,
                         min_knot_slope=1e-3,
