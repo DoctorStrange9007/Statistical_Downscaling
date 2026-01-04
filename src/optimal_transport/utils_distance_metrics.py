@@ -298,7 +298,9 @@ def calculate_wass1_OT(policy_gradient, true_data_model, key):
     return (wass1_OT, wass1_OT_prime)
 
 
-def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer):
+def plot_comparison(
+    n, dims, policy_gradient, true_data_model, run_sett, writer, num_bins: int = 1000
+):
     """
     Plots the marginal distributions (histograms) of the first `dims` dimensions
     for both y and y' at time step `n`.
@@ -309,7 +311,6 @@ def plot_comparison(n, dims, policy_gradient, true_data_model, run_sett, writer)
     - Col 1: y' (True vs Flow)
     """
     # 1. Setup keys and batch size
-    num_bins = run_sett["num_bins"]
     key = jax.random.PRNGKey(int(run_sett["seed"]))
     B_plot = int(run_sett["num_samples_metrics"])
     keys = jax.random.split(key, B_plot)
