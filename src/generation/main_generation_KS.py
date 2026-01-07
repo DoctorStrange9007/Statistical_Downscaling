@@ -48,7 +48,7 @@ args = parser.parse_args()
 with open(args.config, "r") as f:
     run_sett = yaml.safe_load(f)
 
-USE_WANDB = True
+USE_WANDB = False
 TRAIN_DENOISER = False
 TRAIN_PDE = False
 CONTINUE_TRAINING = False
@@ -57,7 +57,9 @@ mode = "eval"
 
 def save_samples_h5(path, samples, *, y_bar=None, run_settings=None, rng_key=None):
     """Save only the samples to an HDF5 file as dataset 'samples'."""
-    arr = np.asarray(samples, dtype=np.float32)
+    arr = np.asarray(
+        samples, dtype=np.float64
+    )  # All the training was performed in single precision (fp32), while the generation of the data was performed in double precision (fp64).
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("samples", data=arr)
@@ -79,6 +81,10 @@ def main():
     u_HFHR, u_LFLR, u_HFLR, x, t = get_raw_datasets(
         file_name=run_sett["general"]["data_file_name"]
     )
+
+    u_LFLR = u_LFLR[
+        :, :, ::2
+    ]  # they do this but don't explicitly mention it, note now we need a d_prime of 24
 
     u_hfhr_samples = u_HFHR.reshape(-1, int(run_sett["general"]["d"]), 1)
     u_lflr_samples = u_LFLR.reshape(-1, int(run_sett["general"]["d_prime"]), 1)
@@ -286,6 +292,22 @@ def main():
             weighted=True,
             epsilon=float(run_sett["epsilon"]),
         )
+
+        # import numpy as np
+        # import matplotlib.pyplot as plt
+        # Er = np.asarray(jax.device_get(E_ref))
+        ##Ep = np.asarray(jax.device_get(E_pred))
+        # k = np.arange(1, Ep.shape[0] + 1, dtype=float)
+        # plt.figure(figsize=(5.0, 3.6), dpi=150)
+        # plt.loglog(k, Er, "k-", label="Reference", linewidth=2.0)
+        # plt.loglog(k, Ep, color="tab:red", label="Predicted", linewidth=2.0)
+        # plt.xlabel(r"$k$")
+        # plt.ylabel(r"$E(k)$")
+        # plt.grid(True, which="both", ls="--", alpha=0.3)
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.show()
+
         melr_unweighted = calculate_melr_pooled(
             samples,
             u_hfhr_samples,
