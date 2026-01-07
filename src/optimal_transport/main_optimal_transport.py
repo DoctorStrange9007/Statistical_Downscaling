@@ -65,7 +65,7 @@ def main():
     for _ in range(int(run_sett["num_iterations"])):
         key_step = jax.random.fold_in(key_master, _)
         metrics_key = jax.random.fold_in(key_master, 1000000 + _)
-        policy_gradient.update_params(key_step)
+        debug_logs = policy_gradient.update_params(key_step)
         (kld_OT, kld_OT_prime) = calculate_kld_OT(
             policy_gradient, true_data_model, metrics_key
         )
@@ -88,6 +88,16 @@ def main():
                     "metrics/wass1_OT_prime": float(wass1_OT_prime),
                     "metrics/cost_function_yz": float(cost_function_yz),
                     "metrics/cost_function_yyprime": float(cost_function_yyprime),
+                    "debug/cond_A_max": float(debug_logs["cond_A_max"]),
+                    "debug/w_cv_max": float(debug_logs["w_cv_max"]),
+                    "debug/advantage_max": float(debug_logs["advantage_max"]),
+                    "debug/norm_G_val": float(debug_logs["norm_G_val"]),
+                    "debug/norm_G_kl_scaled": float(debug_logs["norm_G_kl_scaled"]),
+                    "debug/grad_global_norm_preclip": float(
+                        debug_logs["grad_global_norm_preclip"]
+                    ),
+                    "debug/adaptive_beta": float(debug_logs["adaptive_beta"]),
+                    "debug/beta_value": float(debug_logs["beta_value"]),
                 },
             )
     for n in range(int(run_sett["N"] + 1)):
