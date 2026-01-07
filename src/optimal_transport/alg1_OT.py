@@ -59,7 +59,7 @@ class PolicyGradient:
             end_value=float(run_sett["optimizer"]["end_value"]),
         )
         self.optimizer = optax.chain(
-            optax.clip_by_global_norm(1.0),
+            optax.clip_by_global_norm(50.0),
             optax.adam(learning_rate=self.lrate_schedule),
         )
         self.opt_state = self.optimizer.init(self.normalizing_flow_model.params_trees)
@@ -71,6 +71,8 @@ class PolicyGradient:
             self.beta_schedule = optax.constant_schedule(
                 self.run_sett["beta_schedule"]["end_boundary_value"]
             )
+        elif self.run_sett["beta_schedule"]["type"] == "adaptive_min":
+            self.beta_schedule = optax.constant_schedule(100.0)
         elif self.run_sett["beta_schedule"]["type"] == "schedule":
             self.beta_schedule = optax.join_schedules(
                 schedules=[
@@ -161,6 +163,8 @@ class PolicyGradient:
         jitter_num_stab = 1e-6 * jnp.eye(d_phi)
         A = A + jitter_num_stab[None, ...]
 
+        cond_A = jnp.linalg.cond(A)
+
         # b = sum_b  (S V phi)
         b_vec = jnp.einsum(
             "nbi,nb,nb->ni",
@@ -169,9 +173,19 @@ class PolicyGradient:
             costs_V_stack,
         )
 
-        w_optimal = jnp.linalg.solve(A, b_vec[..., None]).squeeze(-1)
+        # we see jittering in cond_A before a crash
+        # rcond=1e-3 tells JAX to ignore small singular values that cause jitter
+        w_optimal = jax.vmap(lambda _A, _b: jnp.linalg.lstsq(_A, _b, rcond=1e-3)[0])(
+            A, b_vec[..., None]
+        )
+        w_optimal = w_optimal.squeeze(-1)
 
-        return {"c": c_optimal, "w": w_optimal}
+        return {
+            "c": c_optimal,
+            "w": w_optimal,
+            "debug_cond_A_max": jnp.max(cond_A),
+            "debug_w_max": jnp.max(jnp.abs(w_optimal)),
+        }
 
     def per_trajectory_joint_score(self, n, y_traj, y_traj_prime, params_trees):
         """
@@ -344,6 +358,8 @@ class PolicyGradient:
         )
 
         final_grads_sum = []
+        max_advantage = 0.0
+
         for n in range(self.N + 1):
             if n == 0:
                 l_n = control_variates_results["c"]
@@ -353,6 +369,8 @@ class PolicyGradient:
                 l_n = jnp.dot(phi_n, w_n)
 
             diff_V_l = costs_V[n] - l_n
+
+            max_advantage = jnp.maximum(max_advantage, jnp.max(jnp.abs(diff_V_l)))
 
             def scale_grad(g, adv):
                 target_shape = (g.shape[0],) + (1,) * (g.ndim - 1)
@@ -364,7 +382,11 @@ class PolicyGradient:
 
             final_grads_sum.append(grads_sum)
 
-        return final_grads_sum
+        return final_grads_sum, {
+            "cond_A_max": control_variates_results["debug_cond_A_max"],
+            "w_cv_max": control_variates_results["debug_w_max"],
+            "advantage_max": max_advantage,
+        }
 
     @partial(jax.jit, static_argnums=0)
     def G_KL_run_per_trajectory(self, key, params_trees):
@@ -438,17 +460,36 @@ class PolicyGradient:
             for times n = 0..N.
         """
         key_model, key_true = jax.random.split(key)
-        G_val = self.G_val(
+        G_val, debug_metrics = self.G_val(
             key_model, params_trees
         )  # note that this is actually G_val-L
         G_kl = self.G_KL(key_true, params_trees)
+
+        sq_norm_val = tree_reduce(lambda a, x: a + jnp.sum(x**2), G_val, 0.0)
+        sq_norm_kl = tree_reduce(lambda a, x: a + jnp.sum(x**2), G_kl, 0.0)
+
+        norm_val = jnp.sqrt(sq_norm_val)
+        norm_kl = jnp.sqrt(sq_norm_kl)
+
+        adaptive_beta = beta_value * (norm_val / (norm_kl + 1e-8))
+
         # Scale by batch size and beta
-        return [
+        full_grads = [
             tree_map(
-                lambda gv, gk: (1 / self.B) * gv + (beta_value / self.B) * gk, gv, gk
+                lambda gv, gk: (1 / self.B) * gv + (adaptive_beta / self.B) * gk, gv, gk
             )
             for gv, gk in zip(G_val, G_kl)
         ]
+        debug_metrics.update(
+            {
+                "norm_G_val": norm_val / self.B,
+                "norm_G_kl_scaled": (adaptive_beta * norm_kl) / self.B,
+                "adaptive_beta": adaptive_beta,
+                "beta_value": beta_value,
+            }
+        )
+
+        return full_grads, debug_metrics
 
     def update_params(self, key):
         """
@@ -463,7 +504,12 @@ class PolicyGradient:
         """
 
         beta_value = self.beta_schedule(self._step)
-        grads = self.g(key, self.normalizing_flow_model.params_trees, beta_value)
+        grads, debug_metrics = self.g(
+            key, self.normalizing_flow_model.params_trees, beta_value
+        )
+
+        grad_norm = jnp.sqrt(tree_reduce(lambda a, x: a + jnp.sum(x**2), grads, 0.0))
+        debug_metrics["grad_global_norm_preclip"] = grad_norm
 
         updates, self.opt_state = self.optimizer.update(
             grads, self.opt_state, self.normalizing_flow_model.params_trees
@@ -472,6 +518,8 @@ class PolicyGradient:
             self.normalizing_flow_model.params_trees, updates
         )
         self._step += 1
+
+        return debug_metrics
 
 
 class NormalizingFlowModel:
@@ -546,14 +594,19 @@ class NormalizingFlowModel:
         h = hk.Sequential(
             [
                 hk.Linear(self.hidden_size, w_init=init),
-                jax.nn.tanh,
+                jax.nn.silu,
                 hk.Linear(self.hidden_size, w_init=init),
-                jax.nn.tanh,
+                jax.nn.silu,
             ]
         )(model_input)
 
         skip_connection = hk.Linear(self.hidden_size, w_init=init)(model_input)
-        h_combined = h + skip_connection
+        # starting at init and b_init=0 so that gate is 0.5 at initialisation as I don't want to insert too much info about
+        # the true data into the initialisation
+        gate = jax.nn.sigmoid(
+            hk.Linear(self.hidden_size, w_init=init, b_init=jnp.zeros)(model_input)
+        )
+        h_combined = h * gate + skip_connection * (1 - gate)
 
         output_layer = hk.Linear(
             self.state_dim
@@ -602,11 +655,11 @@ class NormalizingFlowModel:
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-4.0,
-                        range_max=4.0,
+                        range_min=-6.0,
+                        range_max=6.0,
                         boundary_slopes="identity",
-                        min_bin_size=1e-3,
-                        min_knot_slope=1e-3,
+                        min_bin_size=1e-2,
+                        min_knot_slope=1e-2,
                     ),
                     conditioner=conditioner,
                 )
@@ -668,11 +721,11 @@ class NormalizingFlowModel:
                     mask=mask,
                     bijector=lambda params: distrax.RationalQuadraticSpline(
                         params,
-                        range_min=-4.0,
-                        range_max=4.0,
+                        range_min=-6.0,
+                        range_max=6.0,
                         boundary_slopes="identity",
-                        min_bin_size=1e-3,
-                        min_knot_slope=1e-3,
+                        min_bin_size=1e-2,
+                        min_knot_slope=1e-2,
                     ),
                     conditioner=conditioner,
                 )
@@ -798,7 +851,9 @@ class NormalizingFlowModel:
             else:
                 log_prob = self.log_prob_cond(p, action, state, n)
 
-            return log_prob
+            # log(0) = -inf will break the gradient, produce NaNs.
+            # Capping at -100.0 prevents the gradient from exploding to 10^15.
+            return jnp.maximum(log_prob, -100.0)
 
         return jax.grad(forward_loss)(params)
 
