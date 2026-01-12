@@ -5,14 +5,14 @@ paired trajectories (y, y') for use in statistical downscaling experiments.
 There are two variants:
   - TrueDataModelUnimodal: single-mode noise model
       Transition per dimension i:
-        x_t[i] = base_means[i] + 0.5 * x_{t-1}[i] + eps_t[i],
+        y_t[i] = base_means[i] + 0.5 * y_{t-1}[i] + eps_t[i],
         where eps_t[i] = [eps_y, eps_y'] with
           eps_y ~ Normal(0, 0.5^2),
           eps_y' = 4 * Beta(2, 5) - 1.5.
   - TrueDataModelBimodal: per-dimension fixed-mode (selector) mixture
       A Bernoulli selector s[i] = (s_y, s_y') is sampled once per dimension
       and held fixed across time. Then:
-        x_t[i] = base_means[i] + 0.5 * x_{t-1}[i] + eps_t[i],
+        y_t[i] = base_means[i] + 0.5 * y_{t-1}[i] + eps_t[i],
         with eps_t[i] = [eps_y, eps_y'] where:
           For y:
             if s_y:   eps_y ~ Normal(1.5, 0.5^2)
