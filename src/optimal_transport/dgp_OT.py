@@ -47,6 +47,7 @@ class TrueDataModelUnimodal:
                 - 'N' (int): Number of transition steps to sample.
                 - 'd' (int): Number of spatial dimensions.
         """
+        self.run_sett = run_sett
         run_sett_global = run_sett["global"]
         self.N = run_sett_global["N"]
         self.d = run_sett_global["d"]
@@ -123,6 +124,7 @@ class TrueDataModelBimodal:
                 - 'N' (int): Number of transition steps to sample.
                 - 'd' (int): Number of spatial dimensions.
         """
+        self.run_sett = run_sett
         run_sett_global = run_sett["global"]
         self.N = run_sett_global["N"]
         self.d = run_sett_global["d"]
