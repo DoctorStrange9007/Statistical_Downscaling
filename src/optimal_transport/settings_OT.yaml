@@ -1,0 +1,66 @@
+global:
+  seed: 0
+  N: 3
+  d: 2
+  B: 128
+  time_emb_dim: 16
+  num_iterations: 30000
+  RNG_NAMESPACE: 2026000000
+marginal_flow:
+  num_bins: 8
+  num_layers: 4
+  hidden_size: 128
+  # need to calculate these specifically data-based!!
+  range_min: -4.0
+  range_max: 4.0
+correlation_flow:
+  rho_max: 0.95
+  rho_hidden: 64
+  hidden_size: 128
+beta_schedule:
+  type: "constant"
+  warmup_end_ratio: 0.2
+  init_boundary_value: 0.0
+  end_boundary_value: 100.0
+  kl_only_warmup_steps: 0
+lr_schedule:
+  type: "constant"
+  constant_lr: 1e-3
+  init_value: 0.0
+  peak_value: 0.0003
+  warmup_steps: 10000
+  decay_steps: 40000
+  end_value: 0.000001
+ema: 
+  ema_decay: 0.999
+  use_ema_eval: True
+preprocessing:
+  use_data_normalization: True
+  winsor_clip_z: 10.0
+  num_samples: 4096
+  chunk_size: 512
+  mode: "time_varying"
+  eps: 1e-6
+  RNG_NAMESPACE_NORM: 20260113
+baseline_fitting:
+  cv_ridge: 1e-3
+  cv_split_ratio: 0.0
+policy_gradient:
+  mix_pathwise_alpha: 0.0
+  cv_split_ratio: 0.5
+  use_control_variates: True
+  use_advantage_standardization: True
+  RNG_NAMESPACE_PG: 2026
+metrics:
+  chunk_size: 256
+  num_samples: 2048
+  log_scalar_every: 200
+  log_adjcorr_every: 3000
+  adjcorr_first_k: 3
+  log_hist_every: 3000
+  log_hist_n: 4
+  log_train_every: 50
+  plot_samples_max: 2048
+  adjcorr_max_samples: 2048
+wandb:
+  use_wandb: True
