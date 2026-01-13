@@ -132,6 +132,8 @@ class DataNormalizer:
         self.std_yp = jnp.sqrt(self.var_yp)
         self.log_det = jnp.sum(jnp.log(self.std_y)) + jnp.sum(jnp.log(self.std_yp))
 
+        return self
+
     def transform(
         self, mode, y: jnp.ndarray, yp: jnp.ndarray
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -160,14 +162,18 @@ class DataNormalizer:
             y_z = (y - self.mu_y) / self.std_y
             yp_z = (yp - self.mu_yp) / self.std_yp
 
-            def _winsor(winsor_clip_z, z: jnp.ndarray) -> jnp.ndarray:
+            def _winsor(z: jnp.ndarray) -> jnp.ndarray:
                 """Clip z-scores to [-winsor_clip_z, winsor_clip_z] if enabled."""
-                if winsor_clip_z is not None and winsor_clip_z > 0.0:
-                    return jnp.clip(z, -winsor_clip_z, winsor_clip_z)
+                if self.winsor_clip_z is not None and self.winsor_clip_z > 0.0:
+                    return jnp.clip(z, -self.winsor_clip_z, self.winsor_clip_z)
                 return z
 
             return _winsor(y_z), _winsor(yp_z)
         elif mode == "denormalize":
-            y = y_z * self.std_y + self.mu_y
-            yp = yp_z * self.std_yp + self.mu_yp
-            return y, yp
+            y_denorm = y * self.std_y + self.mu_y
+            yp_denorm = yp * self.std_yp + self.mu_yp
+            return y_denorm, yp_denorm
+        else:
+            raise ValueError(
+                f"Unknown mode '{mode}'; expected 'normalize' or 'denormalize'."
+            )
