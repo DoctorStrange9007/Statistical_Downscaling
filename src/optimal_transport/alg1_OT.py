@@ -1,993 +1,746 @@
+"""Core normalizing-flow and policy-gradient components for optimal transport.
+
+This module implements:
+- sinusoidal time embeddings for discrete time steps (as seperate function as it has multiple calls in separate modules)
+- a conditional spline coupling flow (per-dimension rational-quadratic splines)
+- a correlation network producing time- and state-dependent correlation `rho`
+- a normalizing-flow model that samples sequences and computes log-probabilities
+- a policy-gradient trainer that fits the flow to minimize transport cost and
+  match the true data distribution (via negative log-likelihood), optionally
+  with EMA parameters for evaluation and control variates for variance reduction
+
+Shapes and conventions
+----------------------
+- Dimension `d`: data dimensionality for each time step.
+- Time length `N_len = N + 1`: we index time `n` in [0, N].
+- A trajectory in normalized coordinates has shape (N+1, d, 1).
+- Sampling typically works in normalized space and is converted to ORIGINAL
+  space via the transform method of the `DataNormalizer`.
+
+External interfaces used
+------------------------
+- `DataNormalizer` from `preprocessing_OT` providing:
+    - `.fit()` to compute dataset statistics
+    - `.transform(mode, y, yp)` where mode in {"normalize","denormalize"}
+    - attribute `log_det` used to adjust log-probabilities if normalization is on
+- `true_data_model` providing:
+    - `.sample_true_trajectory(key) -> (y, y')` in ORIGINAL space
+"""
+
 import jax
 import jax.numpy as jnp
 import jax.lax as lax
-from jax.tree_util import tree_map, tree_reduce
-from functools import partial
 import haiku as hk
 import distrax
 import optax
+from typing import Tuple
+from functools import partial
+
+from preprocessing_OT import DataNormalizer
 
 
-class PolicyGradient:
+def sinusoidal_time_embedding(n: jnp.ndarray, dim: int) -> jnp.ndarray:
+    """Return sinusoidal time embedding for step index `n`.
+
+    This mirrors positional encodings: for frequencies geometrically spaced
+    between [1, 1/10000] we apply sin/cos and concatenate.
+
+    Parameters
+    ----------
+    n : jnp.ndarray
+        Scalar or array of time indices.
+    dim : int
+        Embedding dimension.
+
+    Returns
+    -------
+    jnp.ndarray
+        Embedding with shape `n.shape + (dim,)`.
     """
-    PolicyGradient class for the optimal transport problem.
+    dim = int(dim)
+    half = dim // 2
+    n = n.astype(jnp.float32)
+    freqs = jnp.exp(
+        -jnp.log(10000.0)
+        * jnp.arange(0, half, dtype=jnp.float32)
+        / jnp.maximum(half, 1)
+    )
+    args = n[..., None] * freqs[None, ...]
+    emb = jnp.concatenate([jnp.sin(args), jnp.cos(args)], axis=-1)
+    if dim % 2 == 1:
+        emb = jnp.pad(emb, [(0, 0)] * (emb.ndim - 1) + [(0, 1)])
+    return emb
 
-    This class computes gradients for a sequence of normalizing-flow models
-    defining joint densities q_0, q_1, ..., q_N over pairs (y_n, y'_n).
-    The total objective consists of:
-      - A cost term based on a joint quadratic cost function over trajectory
-        segments (n..N), and
-      - A KL-based regularizer w.r.t. a true data model.
 
-    Gradients are estimated from mini-batches of sampled trajectories using
-    control variates. For n >= 1, the control variate is linear in a feature
-    vector built from the previous pair (y_{n-1}, y'_{n-1}); for n = 0 a
-    constant control variate is used. Closed-form, weighted least-squares fits
-    are used to determine optimal control-variates per time n.
+class ConditionerMLP(hk.Module):
+    """MLP producing spline parameters for a coupling flow conditioner.
+
+    Given concatenated input `[x, context]`, outputs per-dimension parameters for
+    a rational-quadratic spline: for each dimension we emit
+    `3 * num_bins + 1` values (bin widths (K), bin heights (K), knot slopes ((K-1)(internal)+2(boundary))).
     """
 
-    def __init__(self, run_sett: dict, normalizing_flow_model, true_data_model):
-        """
-        Initialize the PolicyGradient object.
+    def __init__(self, name: str, d: int, num_bins: int, hidden_size: int):
+        super().__init__(name=name)
+        self.d = int(d)
+        self.num_bins = int(num_bins)
+        self.hidden_size = int(hidden_size)
+        self.out_dim = self.d * (3 * self.num_bins + 1)
 
-        Args:
-            run_sett: Dictionary of run settings. Must contain:
-                - "beta": float, KL regularization weight
-                - "N": int, number of transitions (trajectory length is N+1)
-                - "d_prime": int, dimension per y (and y')
-                - "B": int, batch size for gradient estimation
-                - "lrates": float or sequence, learning rate(s); if a sequence,
-                  the first element is used here
-            normalizing_flow_model: Model exposing:
-                - params_trees: list of N+1 parameter pytrees
-                - sample_trajectory(key, params_trees) -> (y_traj, y_traj_prime)
-                - get_log_prob_grad(params, n, action, state=None) -> grad pytree
-            true_data_model: Model exposing:
-                - sample_true_trajectory(key) -> (z_traj, z_traj_prime)
-        """
-        self.run_sett = run_sett  # Store the full run_sett
-        self.N = self.run_sett["N"]
-        self.d_prime = self.run_sett["d_prime"]
-        self.true_data_model = true_data_model
-        self.normalizing_flow_model = normalizing_flow_model
-        self.B = self.run_sett["B"]
-        self.lrate_schedule = optax.warmup_cosine_decay_schedule(
-            init_value=float(run_sett["optimizer"]["init_value"]),
-            peak_value=float(run_sett["optimizer"]["peak_value"]),
-            warmup_steps=int(run_sett["optimizer"]["warmup_steps"]),
-            decay_steps=int(run_sett["optimizer"]["decay_steps"]),
-            end_value=float(run_sett["optimizer"]["end_value"]),
+    def __call__(self, inp: jnp.ndarray) -> jnp.ndarray:
+        """Return spline parameters shaped as (..., d, 3*num_bins + 1)."""
+        h = hk.Linear(self.hidden_size)(inp)
+        h = jax.nn.gelu(h)
+        h = hk.Linear(self.hidden_size)(h)
+        h = jax.nn.gelu(h)
+        h = hk.Linear(
+            self.out_dim,
+            w_init=hk.initializers.Constant(0.0),
+            b_init=hk.initializers.Constant(0.0),
+        )(h)
+        return jnp.reshape(h, h.shape[:-1] + (self.d, 3 * self.num_bins + 1))
+
+
+class ConditionalSplineCouplingFlow(hk.Module):
+    """Masked coupling flow with per-dimension rational-quadratic splines.
+
+    The conditioner is an MLP that consumes `[x, context]` and outputs spline
+    parameters. Layers alternate masks over dimensions.
+    """
+
+    def __init__(
+        self,
+        run_sett: dict,
+        name: str,
+        context_dim: int,
+    ):
+        super().__init__(name=name)
+        self.run_sett_marginal_flow = run_sett["marginal_flow"]
+        self.run_sett_global = run_sett["global"]
+        self.d = int(self.run_sett_global["d"])
+        self.context_dim = int(context_dim)
+        self.num_layers = int(self.run_sett_marginal_flow["num_layers"])
+        self.hidden_size = int(self.run_sett_marginal_flow["hidden_size"])
+        self.num_bins = int(self.run_sett_marginal_flow["num_bins"])
+        self.range_min = float(self.run_sett_marginal_flow["range_min"])
+        self.range_max = float(self.run_sett_marginal_flow["range_max"])
+
+        self._conds = [
+            ConditionerMLP(f"cond_{i}", self.d, self.num_bins, self.hidden_size)
+            for i in range(self.num_layers)
+        ]
+        self._masks = [
+            (jnp.arange(self.d) % 2 == (i % 2)) for i in range(self.num_layers)
+        ]
+
+        self._base = distrax.MultivariateNormalDiag(
+            loc=jnp.zeros((self.d,), dtype=jnp.float32),
+            scale_diag=jnp.ones((self.d,), dtype=jnp.float32),
         )
-        self.optimizer = optax.chain(
-            optax.clip_by_global_norm(50.0),
-            optax.adam(learning_rate=self.lrate_schedule),
-        )
-        self.opt_state = self.optimizer.init(self.normalizing_flow_model.params_trees)
 
-        start_ramp_step = int(self.run_sett["num_iterations"] * 0.2)
-        end_ramp_step = int(self.run_sett["num_iterations"] * 0.8)
-        ramp_time = end_ramp_step - start_ramp_step
-        if self.run_sett["beta_schedule"]["type"] == "constant":
-            self.beta_schedule = optax.constant_schedule(
-                self.run_sett["beta_schedule"]["end_boundary_value"]
-            )
-        elif self.run_sett["beta_schedule"]["type"] == "adaptive_min":
-            self.beta_schedule = optax.constant_schedule(100.0)
-        elif self.run_sett["beta_schedule"]["type"] == "schedule":
-            self.beta_schedule = optax.join_schedules(
-                schedules=[
-                    optax.constant_schedule(
-                        self.run_sett["beta_schedule"]["init_boundary_value"]
-                    ),
-                    optax.linear_schedule(
-                        self.run_sett["beta_schedule"]["init_boundary_value"],
-                        self.run_sett["beta_schedule"]["end_boundary_value"],
-                        ramp_time,
-                    ),
-                    optax.constant_schedule(
-                        self.run_sett["beta_schedule"]["end_boundary_value"]
-                    ),
-                ],
-                boundaries=[start_ramp_step, end_ramp_step],
-            )
-        self._step = 0
+    def _make_dist(self, context: jnp.ndarray) -> distrax.Transformed:
+        """Construct the transformed distribution for a given `context`."""
+        layers = []
+        for i in range(self.num_layers):
+            mask = self._masks[i]
+            cond_mlp = self._conds[i]
 
-    def _get_control_variate_features(
-        self, prev_y: jnp.ndarray, prev_yp: jnp.ndarray
+            def _broadcast_context(ctx: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+                return jnp.broadcast_to(ctx, x.shape[:-1] + ctx.shape)
+
+            def _conditioner(x, ctx=context, mlp=cond_mlp):
+                ctx_b = _broadcast_context(ctx, x)
+                inp = jnp.concatenate([x, ctx_b], axis=-1)
+                return mlp(inp)
+
+            layers.append(
+                distrax.MaskedCoupling(
+                    mask=mask,
+                    conditioner=_conditioner,
+                    bijector=lambda params: distrax.RationalQuadraticSpline(
+                        params,
+                        range_min=self.range_min,
+                        range_max=self.range_max,
+                        boundary_slopes="identity",
+                        min_bin_size=1e-3,
+                        min_knot_slope=1e-3,
+                    ),
+                )
+            )
+        return distrax.Transformed(self._base, distrax.Chain(layers))
+
+    def forward_from_base(self, eps: jnp.ndarray, context: jnp.ndarray) -> jnp.ndarray:
+        """Map base sample `eps` to data space given `context`."""
+        dist = self._make_dist(context)
+        return dist.bijector.forward(eps)
+
+    def log_prob_and_base(
+        self, x: jnp.ndarray, context: jnp.ndarray
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Return log-probability of `x` and corresponding base variable `u`."""
+        dist = self._make_dist(context)
+        u, ildj = dist.bijector.inverse_and_log_det(x)
+        logp = self._base.log_prob(u) + ildj
+        return logp, u
+
+
+class RhoNet(hk.Module):
+    """Network producing correlation vector `rho` in [-rho_max, rho_max]^d.
+
+    Inputs are previous y, previous y' and a time embedding for step `n`. Output
+    is clipped to [-rho_max, rho_max].
+    """
+
+    def __init__(self, run_sett: dict, name: str):
+        super().__init__(name=name)
+        self.run_sett_global = run_sett["global"]
+        self.run_sett_correlation_flow = run_sett["correlation_flow"]
+        self.d = int(self.run_sett_global["d"])
+        self.time_emb_dim = int(self.run_sett_global["time_emb_dim"])
+        self.hidden_size = int(self.run_sett_correlation_flow["hidden_size"])
+        self.rho_max = float(self.run_sett_correlation_flow["rho_max"])
+
+    def __call__(
+        self, prev_y: jnp.ndarray, prev_yp: jnp.ndarray, n: jnp.ndarray
     ) -> jnp.ndarray:
-        """
-        Build the linear control-variate feature vector for time n >= 1.
-
-        Given previous observations (y_{n-1}, y'_{n-1}), returns
-        phi_{n} = concat([1, y_{n-1}, y'_{n-1}]).
-
-        Args:
-            prev_y: Array with shape (d_prime, 1) or (d_prime,), previous y.
-            prev_yp: Array with shape (d_prime, 1) or (d_prime,), previous y'.
-
-        Returns:
-            Array with shape (1 + 5 * d_prime,), the feature vector
-            concat([1, prev_y, prev_yp, prev_y**2, prev_yp**2, prev_y * prev_yp]).
-        """
-
-        prev_y = jnp.squeeze(prev_y)
-        prev_yp = jnp.squeeze(prev_yp)
-
-        linear = jnp.concatenate([prev_y, prev_yp])
-        quadratic = jnp.concatenate([prev_y**2, prev_yp**2, prev_y * prev_yp])
-
-        return jnp.concatenate([jnp.ones(1), linear, quadratic])
-
-    def fit_control_variates(self, costs_V, grads_S_norm_sq_per_batch, phi_features):
-        """
-        Fit optimal control-variates per time n using closed-form WLS.
-
-        For n = 0, fits a scalar constant c that minimizes the squared error of the cost w.r.t c.
-        For each n = 1..N, fits a weight vector w_n for
-        the linear control variate l_n(phi) = phi^T w_n. The weighting per
-        sample uses the squared score-norm at time n.
-
-        Args:
-            costs_V: Sequence of length N+1. Each entry is an array of shape (B,)
-                with the joint cost V_n for each trajectory in the batch.
-            grads_S_norm_sq_per_batch: Sequence of length N+1. Each entry is an
-                array of shape (B,) with the per-trajectory squared L2 norm of
-                the score (gradient of log-prob) at time n.
-            phi_features: Sequence of length N. Each entry is an array with shape
-                (B, d_phi) containing features for n = 1..N, where
-                d_phi = 1 + 5 * d_prime.
-
-        Returns:
-            Dict with:
-              - "c": scalar constant control variate for n = 0
-              - "w": array with shape (N, d_phi), linear weights for n = 1..N
-        """
-
-        cost_V_0, grad_S_0 = costs_V[0], grads_S_norm_sq_per_batch[0]
-
-        c_numerator = jnp.sum(cost_V_0 * grad_S_0)
-        c_optimal = c_numerator / (jnp.sum(grad_S_0) + 1e-8)
-
-        costs_V_stack = jnp.stack(costs_V[1:])
-        grad_S_norm_sq_per_batch_stack = jnp.stack(grads_S_norm_sq_per_batch[1:])
-        phi_features_stack = jnp.stack(phi_features)
-
-        # A = sum_b (S phi phi^T)
-        A = jnp.einsum(
-            "nbi,nb,nbj->nij",
-            phi_features_stack,
-            grad_S_norm_sq_per_batch_stack,
-            phi_features_stack,
-        )
-        n_steps, d_phi, _ = A.shape
-        jitter_num_stab = 1e-6 * jnp.eye(d_phi)
-        A = A + jitter_num_stab[None, ...]
-
-        cond_A = jnp.linalg.cond(A)
-
-        # b = sum_b  (S V phi)
-        b_vec = jnp.einsum(
-            "nbi,nb,nb->ni",
-            phi_features_stack,
-            grad_S_norm_sq_per_batch_stack,
-            costs_V_stack,
-        )
-
-        # we see jittering in cond_A before a crash
-        # rcond=1e-3 tells JAX to ignore small singular values that cause jitter
-        w_optimal = jax.vmap(lambda _A, _b: jnp.linalg.lstsq(_A, _b, rcond=1e-3)[0])(
-            A, b_vec[..., None]
-        )
-        w_optimal = w_optimal.squeeze(-1)
-
-        return {
-            "c": c_optimal,
-            "w": w_optimal,
-            "debug_cond_A_max": jnp.max(cond_A),
-            "debug_w_max": jnp.max(jnp.abs(w_optimal)),
-        }
-
-    def per_trajectory_joint_score(self, n, y_traj, y_traj_prime, params_trees):
-        """
-        Per-trajectory gradient of log q_n w.r.t. parameters at time n.
-
-        Selects the correct flow (unconditional for n = 0, conditional for
-        n >= 1) and returns the gradient of the log-probability density evaluated
-        at the (state, action) extracted from a single trajectory.
-
-        Args:
-            n: Integer in [0, N], index of the flow.
-            y_traj: Array with shape (N+1, d_prime, 1), trajectory of y.
-            y_traj_prime: Array with shape (N+1, d_prime, 1), trajectory of y'.
-            params_trees: List of N+1 parameter pytrees; params_trees[n] is used.
-
-        Returns:
-            Pytree matching the structure of params_trees[n], containing the
-            gradient of the log-probability density for this trajectory and time.
-
-        Notes:
-            Uses lax.switch so that n can be a traced value inside vmaps.
-        """
-
-        def make_branch(n: int):
-            if n == 0:
-
-                def branch(_op=None, n=n):
-                    action = jnp.concatenate(
-                        [y_traj[0].reshape(-1), y_traj_prime[0].reshape(-1)], axis=0
-                    )
-
-                    return self.normalizing_flow_model.get_log_prob_grad(
-                        params_trees[0], 0, action=action, state=None
-                    )
-
-                return branch
-            else:
-
-                def branch(_op=None, n=n):
-                    state = jnp.concatenate(
-                        [y_traj[n - 1].reshape(-1), y_traj_prime[n - 1].reshape(-1)],
-                        axis=0,
-                    )
-                    action = jnp.concatenate(
-                        [y_traj[n].reshape(-1), y_traj_prime[n].reshape(-1)],
-                        axis=0,
-                    )
-
-                    return self.normalizing_flow_model.get_log_prob_grad(
-                        params_trees[n], n, action=action, state=state
-                    )
-
-                return branch
-
-        branches = [make_branch(n) for n in range(self.N + 1)]
-        return lax.switch(n, branches, None)
-
-    def per_trajectory_joint_cost(self, n, y_traj, y_traj_prime):
-        """
-        Compute the joint quadratic cost from step n through N for one trajectory.
-
-        The cost at time n is:
-            V_n = 0.5 * sum_{k=n}^N || y_k - y'_k ||_2^2
-
-        Args:
-            n: Integer in [0, N], start index for the accumulated cost.
-            y_traj: Array with shape (N+1, d_prime, 1), trajectory of y.
-            y_traj_prime: Array with shape (N+1, d_prime, 1), trajectory of y'.
-
-        Returns:
-            Scalar array, the accumulated cost V_n for this trajectory.
-        """
-        y_n_to_N = y_traj[n:]
-        y_n_prime_to_N = y_traj_prime[n:]
-        return (1 / 2) * jnp.sum(
-            (y_n_to_N - y_n_prime_to_N) ** 2
-        )  # sums over axes n to N and d_prime
-
-    @partial(jax.jit, static_argnums=0)
-    def collect_fitting_data_per_trajectory(self, key, params_trees):
-        """
-        Collect per-trajectory quantities needed to fit control variates.
-
-        For a single sampled trajectory, returns:
-          - The score gradients at each time n (as pytrees),
-          - The joint costs V_n for n = 0..N,
-          - The feature vectors phi_n for n = 1..N.
-
-        Args:
-            key: PRNGKey for sampling the trajectory.
-            params_trees: List of N+1 parameter pytrees used for sampling.
-
-        Returns:
-            Tuple of (grads_S, costs_V, phi_features) where:
-              - grads_S: tuple length N+1; entry n is a pytree of gradients
-                for time n (no batch dimension).
-              - costs_V: tuple length N+1 of scalars V_n for this trajectory.
-              - phi_features: tuple length N of arrays with shape (d_phi,)
-                for times 1..N.
-        """
-        y_traj, y_traj_prime = self.normalizing_flow_model.sample_trajectory(
-            key, params_trees
-        )
-
-        grads_S = []
-        costs_V = []
-        phi_features = []
-
-        for n in range(self.N + 1):
-            grad_n = self.per_trajectory_joint_score(
-                n, y_traj, y_traj_prime, params_trees
-            )
-            grads_S.append(grad_n)
-
-            cost_n = self.per_trajectory_joint_cost(n, y_traj, y_traj_prime)
-            costs_V.append(cost_n)
-
-            if n > 0:
-                prev_y = y_traj[n - 1]
-                prev_yp = y_traj_prime[n - 1]
-                phi_n = self._get_control_variate_features(prev_y, prev_yp)
-                phi_features.append(phi_n)
-
-        return tuple(grads_S), tuple(costs_V), tuple(phi_features)
-
-    def G_val(self, key, params_trees):
-        """
-        Compute G_val -L (adjusted for control variates (note slightly different than notation in document)).
-
-        This function:
-          1) Samples B trajectories,
-          2) Computes per-time score gradients and costs,
-          3) Fits optimal control variates (constant for n=0, linear for n>=1),
-          4) Forms advantages (V_n - l_n) and weights gradients accordingly,
-          5) Sums gradients over the batch dimension.
-
-        Args:
-            key: PRNGKey for trajectory sampling.
-            params_trees: List of N+1 parameter pytrees.
-
-        Returns:
-            List length N+1 of pytrees. Each pytree matches params_trees[n] and
-            contains the batch-summed gradient contribution for time n (not
-            averaged by B yet).
-        """
-        keys = jax.random.split(key, self.B)
-        grads_S, costs_V, phi_features = jax.vmap(
-            self.collect_fitting_data_per_trajectory, in_axes=(0, None)
-        )(keys, params_trees)
-
-        costs_V = [jnp.array(v) for v in costs_V]
-        phi_features = [jnp.array(p) for p in phi_features]
-
-        grads_S_norm_sq_per_batch = []
-
-        for n in range(self.N + 1):
-            grad_n = grads_S[n]
-            # iterates ocer all leaves of the gradient pytree computes squared L2,
-            # accumulates per leaf norms across the whole tree starting from 0.0
-            # resulting in length B vector with the total squared gradient norm for each batch at time n
-            norm_sq_score = tree_reduce(
-                lambda a, x: a + jnp.sum(x**2, axis=tuple(range(1, x.ndim))),
-                grad_n,
-                0.0,
-            )
-            grads_S_norm_sq_per_batch.append(norm_sq_score)
-
-        control_variates_results = self.fit_control_variates(
-            costs_V, grads_S_norm_sq_per_batch, phi_features
-        )
-
-        final_grads_sum = []
-        max_advantage = 0.0
-
-        for n in range(self.N + 1):
-            if n == 0:
-                l_n = control_variates_results["c"]
-            else:
-                w_n = control_variates_results["w"][n - 1]
-                phi_n = phi_features[n - 1]
-                l_n = jnp.dot(phi_n, w_n)
-
-            diff_V_l = costs_V[n] - l_n
-
-            max_advantage = jnp.maximum(max_advantage, jnp.max(jnp.abs(diff_V_l)))
-
-            def scale_grad(g, adv):
-                target_shape = (g.shape[0],) + (1,) * (g.ndim - 1)
-                return g * adv.reshape(target_shape)
-
-            weighted_grads = tree_map(lambda g: scale_grad(g, diff_V_l), grads_S[n])
-
-            grads_sum = tree_map(lambda g: g.sum(axis=0), weighted_grads)
-
-            final_grads_sum.append(grads_sum)
-
-        return final_grads_sum, {
-            "cond_A_max": control_variates_results["debug_cond_A_max"],
-            "w_cv_max": control_variates_results["debug_w_max"],
-            "advantage_max": max_advantage,
-        }
-
-    @partial(jax.jit, static_argnums=0)
-    def G_KL_run_per_trajectory(self, key, params_trees):
-        """
-        Per-trajectory contribution of the KL regularizer gradient.
-
-        Draws one trajectory from the true data model and accumulates the
-        gradients of the model log-probabilities evaluated along that true
-        trajectory for all times n.
-
-        Args:
-            key: PRNGKey for sampling the true trajectory.
-            params_trees: List of N+1 parameter pytrees.
-
-        Returns:
-            Tuple length N+1 of pytrees; entry n is the gradient w.r.t.
-            params_trees[n] for this single trajectory.
-        """
-        z_traj, z_traj_prime = self.true_data_model.sample_true_trajectory(key)
-        grads_all = [tree_map(jnp.zeros_like, p) for p in params_trees]
-        for n in range(self.N + 1):
-            grad_n = self.per_trajectory_joint_score(
-                n, z_traj, z_traj_prime, params_trees
-            )
-            grads_all[n] = tree_map(lambda a, b: a + b, grads_all[n], grad_n)
-
-        return tuple(grads_all)
-
-    @partial(jax.jit, static_argnums=0)
-    def G_KL(self, key, params_trees):
-        """
-        Compute batch-summed gradient of the KL regularizer.
-
-        Samples B true trajectories and sums their per-time gradients, applying
-        a factor of -2.
-
-        Args:
-            key: PRNGKey for sampling true trajectories.
-            params_trees: List of N+1 parameter pytrees.
-
-        Returns:
-            List length N+1 of pytrees, where entry n contains the batch-summed
-            KL gradient contribution for time n (already scaled by -2).
-        """
-        keys = jax.random.split(key, self.B)
-        result = jax.vmap(self.G_KL_run_per_trajectory, in_axes=(0, None))(
-            keys, params_trees
-        )
-        grads_sum = [
-            tree_map(lambda x: -2 * x.sum(axis=0), result[i]) for i in range(self.N + 1)
-        ]
-        return grads_sum
-
-    @partial(jax.jit, static_argnums=0)
-    def g(self, key, params_trees, beta_value):
-        """
-        Full gradient estimator combining cost and KL terms.
-
-        Computes:
-            (1/B) * (G_val(key_model) - L) + (beta/B) * G_KL(key_true)
-        where G_val and G_KL each return batch-summed gradients. The result is
-        therefore a batch-averaged gradient per time n.
-
-        Args:
-            key: PRNGKey split into model and true-data keys.
-            params_trees: List of N+1 parameter pytrees.
-            beta_value: Scalar beta used to scale the KL term at this step.
-
-        Returns:
-            List length N+1 of pytrees containing the averaged gradient estimate
-            for times n = 0..N.
-        """
-        key_model, key_true = jax.random.split(key)
-        G_val, debug_metrics = self.G_val(
-            key_model, params_trees
-        )  # note that this is actually G_val-L
-        G_kl = self.G_KL(key_true, params_trees)
-
-        sq_norm_val = tree_reduce(lambda a, x: a + jnp.sum(x**2), G_val, 0.0)
-        sq_norm_kl = tree_reduce(lambda a, x: a + jnp.sum(x**2), G_kl, 0.0)
-
-        norm_val = jnp.sqrt(sq_norm_val)
-        norm_kl = jnp.sqrt(sq_norm_kl)
-
-        adaptive_beta = beta_value * (norm_val / (norm_kl + 1e-8))
-
-        # Scale by batch size and beta
-        full_grads = [
-            tree_map(
-                lambda gv, gk: (1 / self.B) * gv + (adaptive_beta / self.B) * gk, gv, gk
-            )
-            for gv, gk in zip(G_val, G_kl)
-        ]
-        debug_metrics.update(
-            {
-                "norm_G_val": norm_val / self.B,
-                "norm_G_kl_scaled": (adaptive_beta * norm_kl) / self.B,
-                "adaptive_beta": adaptive_beta,
-                "beta_value": beta_value,
-            }
-        )
-
-        return full_grads, debug_metrics
-
-    def update_params(self, key):
-        """
-        One optimization step: estimate gradients and update model parameters in-place.
-
-        Splits the key, computes the full gradient estimate via `g`, applies
-        clipped gradient descent updates using the configured learning rate,
-        and writes the updated parameter trees back into the normalizing-flow model.
-
-        Args:
-            key: PRNGKey used for both model and true-data sampling.
-        """
-
-        beta_value = self.beta_schedule(self._step)
-        grads, debug_metrics = self.g(
-            key, self.normalizing_flow_model.params_trees, beta_value
-        )
-
-        grad_norm = jnp.sqrt(tree_reduce(lambda a, x: a + jnp.sum(x**2), grads, 0.0))
-        debug_metrics["grad_global_norm_preclip"] = grad_norm
-
-        updates, self.opt_state = self.optimizer.update(
-            grads, self.opt_state, self.normalizing_flow_model.params_trees
-        )
-        self.normalizing_flow_model.params_trees = optax.apply_updates(
-            self.normalizing_flow_model.params_trees, updates
-        )
-        self._step += 1
-
-        return debug_metrics
+        """Compute per-dimension correlation `rho` for time step `n`."""
+        te = sinusoidal_time_embedding(n, self.time_emb_dim).reshape((-1,))
+        inp = jnp.concatenate([prev_y, prev_yp, te], axis=0)
+        h = hk.Linear(self.hidden_size)(inp)
+        h = jax.nn.gelu(h)
+        h = hk.Linear(self.hidden_size)(h)
+        h = jax.nn.gelu(h)
+        out = hk.Linear(self.d)(h)
+        rho = self.rho_max * jnp.tanh(out)
+        return jnp.clip(rho, -self.rho_max, self.rho_max)
 
 
 class NormalizingFlowModel:
-    """
-    Distrax-based RealNVP flows (unconditional for q0, conditional for qn).
+    """Normalizing-flow model to sample sequences and compute log-probabilities.
+
+    The model maintains two conditional flows (for y and y') and a correlation
+    network that couples their base variables via a Gaussian copula with
+    parameter `rho`. Sampling/log-likelihood computations are performed in the
+    normalized space and converted if normalization is enabled.
     """
 
     def __init__(self, run_sett: dict, true_data_model):
-        """
-        Construct a family of RealNVP flows for joint state-action vectors.
-
-        This creates two Haiku-transformed callables for both the unconditional
-        (n = 0) and conditional (n >= 1) models:
-          - log_prob transforms, returning log probability densities
-          - sample transforms, returning RNG-driven samples
-
-        Settings pulled from run_sett:
-          - N: number of transitions (trajectory length is N+1)
-          - d_prime: per-variable dimension (y and y'); state_dim = 2 * d_prime
-          - num_layers: number of alternating masked-coupling layers
-          - hidden_size: width of the conditioner MLPs
-          - seed: PRNG seed used for parameter initialization
-
-        Args:
-            run_sett: Dictionary with fields described above.
-        """
         self.run_sett = run_sett
-        self.N = self.run_sett["N"]
-        self.d_prime = self.run_sett["d_prime"]
-        self.num_bins = self.run_sett["num_bins"]
-        self.state_dim = 2 * self.d_prime
-        self.num_layers = self.run_sett["num_layers"]
-        self.hidden_size = self.run_sett["hidden_size"]
+        self.run_sett_global = run_sett["global"]
+        self.run_sett_marginal_flow = run_sett["marginal_flow"]
+        self.run_sett_correlation_flow = run_sett["correlation_flow"]
+        self.run_sett_preprocessing = run_sett["preprocessing"]
 
-        self.unc_log_prob = hk.transform(
-            lambda x: self._build_unc_dist(n=0).log_prob(x)
+        self.d = int(self.run_sett_global["d"])
+        self.N = int(self.run_sett_global["N"])
+        self.N_len = int(self.N + 1)
+        self.seed = int(self.run_sett_global["seed"])
+        self.time_emb_dim = int(self.run_sett_global["time_emb_dim"])
+
+        self.num_layers = int(self.run_sett_marginal_flow["num_layers"])
+        self.hidden_size = int(self.run_sett_marginal_flow["hidden_size"])
+        self.num_bins = int(self.run_sett_marginal_flow["num_bins"])
+
+        self.rho_hidden = int(self.run_sett_correlation_flow["rho_hidden"])
+        self.rho_max = float(self.run_sett_correlation_flow["rho_max"])
+
+        self.normalizer = DataNormalizer(run_sett, true_data_model).fit()
+        self.use_data_normalization = bool(
+            self.run_sett_preprocessing["use_data_normalization"]
         )
-        self.unc_sample = hk.transform(
-            lambda: self._build_unc_dist(n=0).sample(seed=hk.next_rng_key())
+
+        self._hk_sample_norm = hk.without_apply_rng(
+            hk.transform(self._sample_batch_norm_impl)
+        )
+        self._hk_logprob_steps_norm = hk.without_apply_rng(
+            hk.transform(self._logprob_steps_batch_norm_impl)
+        )
+        self._hk_logprob_total_norm = hk.without_apply_rng(
+            hk.transform(self._logprob_total_batch_norm_impl)
+        )
+        init_key = jax.random.PRNGKey(self.seed)
+        dummy_keys = jax.random.split(init_key, 2)  # 2 needed?
+        self.params = self._hk_sample_norm.init(init_key, keys=dummy_keys)
+
+    def _ctx(self, prev: jnp.ndarray, n: jnp.ndarray) -> jnp.ndarray:
+        """Concatenate previous state with sinusoidal time embedding."""
+        te = sinusoidal_time_embedding(n, self.time_emb_dim).reshape((-1,))
+        return jnp.concatenate([prev, te], axis=0)
+
+    def _make_modules(self):
+        """Create conditional flows for y and y' and the correlation network."""
+        ctx_dim = self.d + self.time_emb_dim
+        y_flow = ConditionalSplineCouplingFlow(
+            run_sett=self.run_sett,
+            name="y_flow",
+            context_dim=ctx_dim,
+        )
+        yp_flow = ConditionalSplineCouplingFlow(
+            run_sett=self.run_sett,
+            name="yp_flow",
+            context_dim=ctx_dim,
+        )
+        rho_net = RhoNet(
+            run_sett=self.run_sett,
+            name="rho_net",
+        )
+        return y_flow, yp_flow, rho_net
+
+    def _sample_one_traj_norm(self, y_flow, yp_flow, rho_net, key: jax.Array):
+        """Sample a single normalized trajectory (y, y') and return mean |rho|."""
+        d, N_len = self.d, self.N_len
+
+        def step(carry, n):
+            prev_y, prev_yp, key_in, rho_acc = carry
+            key_in, k1, k2 = jax.random.split(key_in, 3)
+
+            rho = rho_net(prev_y, prev_yp, n)
+            eps1 = jax.random.normal(k1, (d,))
+            eps2 = jax.random.normal(k2, (d,))
+
+            s = jnp.sqrt(jnp.clip(1.0 - rho * rho, 1e-6, 1.0))
+            u = eps1
+            v = rho * eps1 + s * eps2
+
+            ctx_y = self._ctx(prev_y, n)
+            ctx_yp = self._ctx(prev_yp, n)
+            y_n = y_flow.forward_from_base(u, ctx_y)
+            yp_n = yp_flow.forward_from_base(v, ctx_yp)
+
+            rho_acc = rho_acc + jnp.mean(jnp.abs(rho))
+            return (y_n, yp_n, key_in, rho_acc), (y_n, yp_n)
+
+        prev0 = jnp.zeros((d,), dtype=jnp.float32)
+        carry0 = (prev0, prev0, key, jnp.array(0.0, dtype=jnp.float32))
+        ns = jnp.arange(N_len, dtype=jnp.int32)
+        (_, _, _, rho_sum), (ys, yps) = hk.scan(step, carry0, ns)
+
+        mean_abs_rho = rho_sum / N_len
+        y_traj = ys.reshape((N_len, d, 1))
+        yp_traj = yps.reshape((N_len, d, 1))
+        return y_traj, yp_traj, mean_abs_rho
+
+    def _logprob_steps_one_traj_norm(self, y_flow, yp_flow, rho_net, y_traj, yp_traj):
+        """Compute per-step log-probabilities for a normalized `(y,y')` trajectory."""
+        d, N_len = self.d, self.N_len
+        y_vec = jnp.squeeze(y_traj, axis=-1)
+        yp_vec = jnp.squeeze(yp_traj, axis=-1)
+
+        def step(carry, n):
+            prev_y, prev_yp = carry
+            y_n = y_vec[n]
+            yp_n = yp_vec[n]
+
+            rho = rho_net(prev_y, prev_yp, n)
+            ctx_y = self._ctx(prev_y, n)
+            ctx_yp = self._ctx(prev_yp, n)
+
+            logpy, u = y_flow.log_prob_and_base(y_n, ctx_y)
+            logpyp, v = yp_flow.log_prob_and_base(yp_n, ctx_yp)
+
+            def _gaussian_copula_correction(
+                u: jnp.ndarray, v: jnp.ndarray, rho: jnp.ndarray
+            ) -> jnp.ndarray:
+                rho = jnp.clip(rho, -0.999, 0.999)
+                one_minus = jnp.clip(1.0 - rho * rho, 1e-6, 1.0)
+                quad = (u * u - 2.0 * rho * u * v + v * v) / one_minus
+                corr = -0.5 * jnp.log(one_minus) - 0.5 * quad + 0.5 * (u * u + v * v)
+                return jnp.sum(corr)
+
+            corr = _gaussian_copula_correction(u, v, rho)
+
+            logp_n = logpy + logpyp + corr
+            return (y_n, yp_n), logp_n
+
+        prev0 = jnp.zeros((d,), dtype=jnp.float32)
+        ns = jnp.arange(N_len, dtype=jnp.int32)
+        (_, _), logp_steps = hk.scan(step, (prev0, prev0), ns)
+        return logp_steps
+
+    def _sample_batch_norm_impl(self, keys: jax.Array):
+        """Haiku-transformed: vmap of `_sample_one_traj_norm` over `keys`."""
+        y_flow, yp_flow, rho_net = self._make_modules()
+
+        def one(k):
+            y_z, yp_z, mean_abs_rho = self._sample_one_traj_norm(
+                y_flow, yp_flow, rho_net, k
+            )
+            return y_z, yp_z, mean_abs_rho
+
+        return hk.vmap(one, split_rng=False)(keys)
+
+    def _logprob_steps_batch_norm_impl(self, y_z: jnp.ndarray, yp_z: jnp.ndarray):
+        """Haiku-transformed: vmap per-step log-probs over a batch of trajectories."""
+        y_flow, yp_flow, rho_net = self._make_modules()
+
+        def one(a, b):
+            return self._logprob_steps_one_traj_norm(y_flow, yp_flow, rho_net, a, b)
+
+        return hk.vmap(one, split_rng=False)(y_z, yp_z)
+
+    def _logprob_total_batch_norm_impl(self, y_z: jnp.ndarray, yp_z: jnp.ndarray):
+        """Haiku-transformed: sum step log-probs over time for each trajectory."""
+        steps = self._logprob_steps_batch_norm_impl(y_z, yp_z)
+        return jnp.sum(steps, axis=1)
+
+    def sample_batch_norm(self, params: hk.Params, keys: jax.Array):
+        """Sample a batch of normalized trajectories `(y_z, yp_z, mean_abs_rho)`."""
+        return self._hk_sample_norm.apply(params, keys=keys)
+
+    def logprob_steps_batch_norm(
+        self, params: hk.Params, y_z: jnp.ndarray, yp_z: jnp.ndarray
+    ):
+        """Compute per-step log-probabilities for a batch of normalized trajectories."""
+        return self._hk_logprob_steps_norm.apply(params, y_z=y_z, yp_z=yp_z)
+
+    def logprob_total_batch_norm(
+        self, params: hk.Params, y_z: jnp.ndarray, yp_z: jnp.ndarray
+    ):
+        """Compute total log-probabilities for a batch of normalized trajectories."""
+        return self._hk_logprob_total_norm.apply(params, y_z=y_z, yp_z=yp_z)
+
+
+class PolicyGradient:
+    """Policy-gradient trainer for the normalizing-flow sequence model.
+
+    Optimizes a mixture of:
+    - score-function surrogate cost with advantage weighting and optional control variates
+    - pathwise transport cost
+    - negative log-likelihood on true data with weight beta
+
+    Maintains an EMA of parameters for evaluation if configured.
+    """
+
+    def __init__(self, run_sett: dict, true_data_model, normalizing_flow_model):
+        self.run_sett = run_sett
+        self.run_sett_global = run_sett["global"]
+        self.run_sett_beta = run_sett["beta_schedule"]
+        self.run_sett_lr = run_sett["lr_schedule"]
+        self.run_sett_policy_gradient = run_sett["policy_gradient"]
+        self.run_sett_metrics = run_sett["metrics"]
+        self.run_sett_baseline_fitting = run_sett["baseline_fitting"]
+        self.run_sett_ema = run_sett["ema"]
+
+        self.d = int(self.run_sett_global["d"])
+        self.N = int(self.run_sett_global["N"])
+        self.N_len = int(self.N + 1)
+        self.B = int(self.run_sett_global["B"])
+        self.seed = int(self.run_sett_global["seed"])
+        self.time_emb_dim = int(self.run_sett_global["time_emb_dim"])
+        self.cv_ridge = float(self.run_sett_baseline_fitting["cv_ridge"])
+        self.cv_split_ratio = float(self.run_sett_baseline_fitting["cv_split_ratio"])
+        self._B_fit_static = int(
+            max(0, min(self.B, round(self.cv_split_ratio * self.B)))
         )
 
-        self.cond_log_prob = hk.transform(
-            lambda x, s, n: self._build_cond_dist(s, n).log_prob(x)
+        self.true_data_model = true_data_model
+        self.model = normalizing_flow_model
+
+        self.ema_decay = float(self.run_sett_ema["ema_decay"])
+        self.use_ema_eval = bool(self.run_sett_ema["use_ema_eval"])
+        self.params = self.model.params
+        self.ema_params = jax.tree_util.tree_map(lambda x: x, self.params)
+
+        self.beta_schedule = self._build_beta_schedule()
+        self._last_beta_value = float(self.beta_schedule(0))
+        self.kl_warmup_steps = int(self.run_sett_beta["kl_only_warmup_steps"])
+
+        self.lrate_schedule = self._build_lr_schedule()
+        self.optimizer = optax.adam(learning_rate=self.lrate_schedule)
+        self.opt_state = self.optimizer.init(self.params)
+
+        self.mix_pathwise_alpha = float(
+            self.run_sett_policy_gradient["mix_pathwise_alpha"]
         )
-        self.cond_sample = hk.transform(
-            lambda s, n: self._build_cond_dist(s, n).sample(seed=hk.next_rng_key())
+        self.use_control_variates = bool(
+            self.run_sett_policy_gradient["use_control_variates"]
+        )
+        self.use_advantage_standardization = bool(
+            self.run_sett_policy_gradient["use_advantage_standardization"]
         )
 
-        self.params_trees = []
-        self.mu, self.sig = self._calibrate(
-            true_data_model
-        )  # mu and sig of shape N+1 x state_dim -- mu[n] gives mean of y and y' at time n etc.
-        self.init_all_models(jax.random.PRNGKey(self.run_sett["seed"]))
+        self._step = 0
 
-    def _calibrate(self, true_data_model):
-        """Generates a batch of data to compute mean and std to normalize data before training."""
-        key = jax.random.PRNGKey(self.run_sett["seed"])
-        keys = jax.random.split(key, 2000)
-        z_trajs, z_trajs_prime = jax.vmap(true_data_model.sample_true_trajectory)(keys)
-        joint_data = jnp.concatenate([z_trajs, z_trajs_prime], axis=2)
-        # Compute per-time (n) and per-dimension statistics; keep axes 1 (n) and 2 (state_dim)
-        mu = jnp.mean(joint_data, axis=(0, 3))
-        sig = jnp.std(joint_data, axis=(0, 3))
-        sig = sig + 1e-6
+    def _build_beta_schedule(self):
+        """Create a beta schedule for the NLL weight."""
+        mode_type = str(self.run_sett_beta["type"]).lower()
+        init_beta = float(self.run_sett_beta["init_boundary_value"])
+        end_beta = float(self.run_sett_beta["end_boundary_value"])
+        if mode_type == "constant":
+            return optax.constant_schedule(end_beta)
+        if mode_type == "linear":
+            num_iter = int(self.run_sett_global["num_iterations"])
+            warmup_ratio = float(self.run_sett_beta["warmup_end_ratio"])
+            ramp_steps = max(1, int(num_iter * warmup_ratio))
+            return optax.linear_schedule(init_beta, end_beta, ramp_steps)
+        if mode_type == "schedule":
+            num_iter = int(self.run_sett_beta)
+            start_ramp = int(num_iter * 0.2)
+            end_ramp = int(num_iter * 0.8)
+            ramp = max(1, end_ramp - start_ramp)
+            return optax.join_schedules(
+                schedules=[
+                    optax.constant_schedule(init_beta),
+                    optax.linear_schedule(init_beta, end_beta, ramp),
+                    optax.constant_schedule(end_beta),
+                ],
+                boundaries=[start_ramp, end_ramp],
+            )
+        return optax.constant_schedule(end_beta)
 
-        return mu, sig
-
-    def _shared_conditioner(self, x, context, init):
-        # Needed to be identical for all n for lax.scan to work, for n=0 context just zeros for it to make sense mathematically
-        model_input = jnp.concatenate([x, context], axis=-1)
-
-        h = hk.Sequential(
-            [
-                hk.Linear(self.hidden_size, w_init=init),
-                jax.nn.silu,
-                hk.Linear(self.hidden_size, w_init=init),
-                jax.nn.silu,
-            ]
-        )(model_input)
-
-        skip_connection = hk.Linear(self.hidden_size, w_init=init)(model_input)
-        # starting at init and b_init=0 so that gate is 0.5 at initialisation as I don't want to insert too much info about
-        # the true data into the initialisation
-        gate = jax.nn.sigmoid(
-            hk.Linear(self.hidden_size, w_init=init, b_init=jnp.zeros)(model_input)
-        )
-        h_combined = h * gate + skip_connection * (1 - gate)
-
-        output_layer = hk.Linear(
-            self.state_dim
-            * (3 * self.num_bins + 1),  # NSF (with linear throws away 2 -> 3K-1)
-            w_init=jnp.zeros,
-            b_init=jnp.zeros,
-        )
-        return output_layer(h_combined)
-
-    def _build_unc_dist(self, n: int):
-        """
-        Build the unconditional flow distribution q0 over R^{state_dim}.
-
-        Architecture:
-          - Chain of `num_layers` RealNVP masked-coupling layers
-          - Alternating binary masks across layers
-          - Conditioner MLP produces per-dimension (shift, scale) parameters
-            with elementwise scale = exp(tanh(s_pre)) for stability
-          - Base distribution is standard multivariate normal (diag covariance)
-
-        Args:
-          - n: int, the time step.
-
-        Returns:
-            A `distrax.Transformed` distribution with methods `.log_prob(x)`
-            and `.sample(seed=...)` operating on vectors of shape (..., state_dim).
-        """
-        layers = []
-        for i in range(self.num_layers):
-            mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
-            num_bins = self.num_bins
-
-            def conditioner(x):
-                dummy_state = jnp.zeros_like(x)
-                init = hk.initializers.VarianceScaling(
-                    scale=1.0, mode="fan_avg", distribution="uniform"
-                )
-                params = self._shared_conditioner(x, dummy_state, init)
-
-                return hk.Reshape((self.state_dim, 3 * num_bins + 1))(
-                    params
-                )  # NSF (with linear throuws away 2 -> 3K-1)
-
-            layers.append(
-                distrax.MaskedCoupling(
-                    mask=mask,
-                    bijector=lambda params: distrax.RationalQuadraticSpline(
-                        params,
-                        range_min=-6.0,
-                        range_max=6.0,
-                        boundary_slopes="identity",
-                        min_bin_size=1e-2,
-                        min_knot_slope=1e-2,
-                    ),
-                    conditioner=conditioner,
-                )
+    def _build_lr_schedule(self):
+        """Create learning-rate schedule (constant or cosine with warmup/decay)."""
+        init_value = float(self.run_sett_lr["init_value"])
+        peak_value = float(self.run_sett_lr["peak_value"])
+        warmup_steps = int(self.run_sett_lr["warmup_steps"])
+        decay_steps = int(self.run_sett_lr["decay_steps"])
+        end_value = float(self.run_sett_lr["end_value"])
+        constant_lr = float(self.run_sett_lr["constant_lr"])
+        mode_type = str(self.run_sett_lr["type"]).lower()
+        if mode_type == "constant":
+            return optax.constant_schedule(constant_lr)
+        elif mode_type == "cosine":
+            warmup = optax.linear_schedule(
+                init_value=init_value,
+                end_value=peak_value,
+                transition_steps=max(warmup_steps, 1),
+            )
+            tail = optax.cosine_decay_schedule(
+                init_value=peak_value,
+                decay_steps=max(decay_steps, 1),
+                alpha=end_value / max(peak_value, 1e-12),
             )
 
-        mu_n = self.mu[n]
-        sig_n = self.sig[n]
-        layers.append(
-            distrax.Block(
-                distrax.ScalarAffine(shift=mu_n, scale=sig_n),
-                ndims=1,
-            )
-        )
-        base = distrax.MultivariateNormalDiag(
-            jnp.zeros(self.state_dim), jnp.ones(self.state_dim)
-        )
-        return distrax.Transformed(base, distrax.Chain(layers))
-
-    def _build_cond_dist(self, prev_state, n: int):
-        """
-        Build the conditional flow distribution qn(· | prev_state).
-
-        Similar to `_build_unc_dist` but the conditioner takes the previous
-        state as additional input to produce per-dimension (shift, scale)
-        parameters conditioned on `prev_state`.
-
-        Args:
-            prev_state: Array with shape (..., state_dim). Acts as context and
-                is concatenated with the masked input inside the conditioner.
-            n: int, the time step.
-
-        Returns:
-            A `distrax.Transformed` conditional distribution whose `.log_prob(x)`
-            and `.sample(seed=...)` use the captured `prev_state` context. Inputs
-            and outputs use vectors of shape (..., state_dim).
-        """
-        layers = []
-        mu_prev = self.mu[n - 1]
-        sig_prev = self.sig[n - 1]
-        prev_state_norm = (
-            prev_state - mu_prev
-        ) / sig_prev  # as these are additional inputs to the conditioner, we need to normalize them explicitly
-        for i in range(self.num_layers):
-            mask = jnp.arange(0, self.state_dim) % 2 == (i % 2)
-            num_bins = self.num_bins
-
-            def conditioner(x):
-                init = hk.initializers.VarianceScaling(
-                    scale=1.0, mode="fan_avg", distribution="uniform"
-                )
-                params = self._shared_conditioner(x, prev_state_norm, init)
-
-                return hk.Reshape((self.state_dim, 3 * num_bins + 1))(
-                    params
-                )  # NSF (with linear throuws away 2 -> 3K-1)
-
-            layers.append(
-                distrax.MaskedCoupling(
-                    mask=mask,
-                    bijector=lambda params: distrax.RationalQuadraticSpline(
-                        params,
-                        range_min=-6.0,
-                        range_max=6.0,
-                        boundary_slopes="identity",
-                        min_bin_size=1e-2,
-                        min_knot_slope=1e-2,
-                    ),
-                    conditioner=conditioner,
-                )
+            return optax.join_schedules(
+                schedules=[warmup, tail], boundaries=[max(warmup_steps, 1)]
             )
 
-        mu_n = self.mu[n]
-        sig_n = self.sig[n]
-        layers.append(
-            distrax.Block(
-                distrax.ScalarAffine(shift=mu_n, scale=sig_n),
-                ndims=1,
+    def get_eval_params_trees(self):
+        """Return EMA params if enabled, else current params."""
+        return self.ema_params if self.use_ema_eval else self.params
+
+    def _phi(
+        self, prev_y_z: jnp.ndarray, prev_yp_z: jnp.ndarray, t: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Feature vector for baseline fitting at step `t` given previous states."""
+        prev_y = jnp.squeeze(prev_y_z, -1)
+        prev_yp = jnp.squeeze(prev_yp_z, -1)
+        te = sinusoidal_time_embedding(t, self.time_emb_dim).reshape((-1,))
+        return jnp.concatenate(
+            [jnp.ones((1,), dtype=jnp.float32), prev_y, prev_yp, te], axis=0
+        )
+
+    def _fit_baseline_per_n(self, phi: jnp.ndarray, target: jnp.ndarray, ridge: float):
+        """
+        phi: (B,N+1,p), target: (B,N+1) -> w: (N+1,p)
+        """
+        B, N_len, p = phi.shape
+
+        def solve_one(n):
+            X = phi[:, n, :]
+            y = target[:, n]
+            XtX = X.T @ X + ridge * jnp.eye(p, dtype=X.dtype)
+            Xty = X.T @ y
+            return jnp.linalg.solve(XtX, Xty)
+
+        ns = jnp.arange(N_len, dtype=jnp.int32)
+        return jax.vmap(solve_one)(ns)
+
+    def _baseline_predict(self, phi: jnp.ndarray, w: jnp.ndarray):
+        """Predict baseline values given features `phi` and weights `w`."""
+        return jnp.einsum("bnp,np->bn", phi, w)
+
+    @partial(jax.jit, static_argnums=0)
+    def _train_step(
+        self, params, ema_params, opt_state, key: jax.Array, step_i: jnp.ndarray
+    ):
+        """One training step: compute loss, update params and EMA, return metrics."""
+        beta = jnp.asarray(self.beta_schedule(step_i), dtype=jnp.float32)
+        warm = jnp.asarray(self.kl_warmup_steps, dtype=jnp.int32)
+        beta = jnp.where(step_i < warm, jnp.array(0.0, dtype=jnp.float32), beta)
+
+        key, k_model, k_true = jax.random.split(key, 3)
+        keys_m = jax.random.split(k_model, self.B)
+        keys_t = jax.random.split(k_true, self.B)
+
+        y_true, yp_true = jax.vmap(self.true_data_model.sample_true_trajectory)(keys_t)
+        y_true_z, yp_true_z = self.model.normalizer.transform(
+            "normalize", y_true, yp_true
+        )
+
+        alpha = jnp.clip(
+            jnp.asarray(self.mix_pathwise_alpha, dtype=jnp.float32), 0.0, 1.0
+        )
+
+        def loss_and_aux(p):
+            y_z_s, yp_z_s, rho_abs = self.model.sample_batch_norm(p, keys_m)
+
+            y_z_ng = lax.stop_gradient(y_z_s)
+            yp_z_ng = lax.stop_gradient(yp_z_s)
+
+            y_ng, yp_ng = self.model.normalizer.transform(
+                "denormalize", y_z_ng, yp_z_ng
             )
-        )
-        base = distrax.MultivariateNormalDiag(
-            jnp.zeros(self.state_dim), jnp.ones(self.state_dim)
-        )
-        return distrax.Transformed(base, distrax.Chain(layers))
+            sq = 0.5 * jnp.sum((y_ng - yp_ng) ** 2, axis=(2, 3))
+            V = jnp.flip(jnp.cumsum(jnp.flip(sq, axis=1), axis=1), axis=1)
 
-    def init_all_models(self, master_rng):
-        """
-        Initialize parameters for q0 and q1..qN and store them in `params_trees`.
+            if self.use_control_variates:
+                prev0 = jnp.zeros((self.d, 1), dtype=jnp.float32)
 
-        Creates N+1 parameter pytrees by calling the `.init` of the transformed
-        Haiku functions:
-          - Index 0: parameters for the unconditional log_prob (q0)
-          - Indices 1..N: parameters for the conditional log_prob (qn)
+                def build_phi_one_traj(yz, ypz):
+                    def step(carry, n):
+                        prev_y, prev_yp = carry
+                        cur_phi = self._phi(prev_y, prev_yp, n)
+                        return (yz[n], ypz[n]), cur_phi
 
-        Args:
-            master_rng: JAX PRNGKey used to split keys for each initialization.
+                    ns = jnp.arange(self.N_len, dtype=jnp.int32)
+                    (_, _), phis = lax.scan(step, (prev0, prev0), ns)
+                    return phis
 
-        Side effects:
-            Populates `self.params_trees` with a list of length N+1.
-        """
+                phi = jax.vmap(build_phi_one_traj)(y_z_ng, yp_z_ng)
 
-        dummy_state = jnp.zeros((1, self.state_dim))
-        dummy_action = jnp.zeros((1, self.state_dim))
-
-        for n in range(self.N + 1):
-            master_rng, init_key = jax.random.split(master_rng)
-            if n == 0:
-                params = self.unc_log_prob.init(init_key, dummy_action)
+                if self._B_fit_static <= 0 or self._B_fit_static >= self.B:
+                    w = self._fit_baseline_per_n(phi, V, ridge=self.cv_ridge)
+                    baseline = self._baseline_predict(phi, w)
+                else:
+                    phi_fit = phi[: self._B_fit_static]
+                    V_fit = V[: self._B_fit_static]
+                    w = self._fit_baseline_per_n(phi_fit, V_fit, ridge=self.cv_ridge)
+                    baseline = self._baseline_predict(phi, w)
             else:
-                params = self.cond_log_prob.init(init_key, dummy_action, dummy_state, n)
-            self.params_trees.append(params)
+                baseline = jnp.zeros_like(V)
 
-    def log_prob_0(self, params, action):
-        """
-        Compute log q0(action) for the unconditional model.
+            Adv = V - baseline
 
-        Args:
-            params: Haiku parameter pytree for q0.
-            action: Array with shape (..., state_dim), the input vector.
+            if self.use_advantage_standardization:
+                mean_t = jnp.mean(Adv, axis=0, keepdims=True)
+                std_t = jnp.std(Adv, axis=0, keepdims=True) + 1e-6
+                Adv = (Adv - mean_t) / std_t
 
-        Returns:
-            Array of log-probabilities with shape matching any leading batch dims.
-        """
-        return self.unc_log_prob.apply(params, None, action)
+            Adv = lax.stop_gradient(Adv)
 
-    def log_prob_cond(self, params, action, state, n):
-        """
-        Compute log qn(action | state) for the conditional model.
+            # ---- score-function surrogate ----
+            logp_steps = self.model.logprob_steps_batch_norm(p, y_z_ng, yp_z_ng)
+            loss_cost_sf = jnp.mean(jnp.sum(Adv * logp_steps, axis=1))
 
-        Args:
-            params: Haiku parameter pytree for qn at some step n >= 1.
-            action: Array with shape (..., state_dim), the input vector.
-            state: Array with shape (..., state_dim), the conditioning vector
-                (typically concatenation of previous y and y').
-            n: int, the time step.
+            # ---- pathwise true cost ----
+            y_s, yp_s = self.model.normalizer.transform("denormalize", y_z_s, yp_z_s)
+            V0_pw = 0.5 * jnp.sum((y_s - yp_s) ** 2, axis=(1, 2, 3))
+            cost_mean_pathwise = jnp.mean(V0_pw)
 
-        Returns:
-            Array of log-probabilities with shape matching any leading batch dims.
-        """
-        return self.cond_log_prob.apply(params, None, action, state, n)
+            loss_cost = (1.0 - alpha) * loss_cost_sf + alpha * cost_mean_pathwise
 
-    def _sample_0(self, params, key):
-        """
-        Sample a vector from the unconditional model q0.
-
-        Args:
-            params: Haiku parameter pytree for q0.
-            key: JAX PRNGKey used by the transformed sampler.
-
-        Returns:
-            Array with shape (state_dim,) or with leading batch dims if batched apply.
-        """
-        return self.unc_sample.apply(params, key)
-
-    def _sample_cond(self, params, key, state, n):
-        """
-        Sample a vector from the conditional model qn(· | state).
-
-        Args:
-            params: Haiku parameter pytree for qn at some step n >= 1.
-            key: JAX PRNGKey used by the transformed sampler.
-            state: Array with shape (..., state_dim), conditioning vector.
-            n: int, the time step.
-
-        Returns:
-            Array with shape (state_dim,) or with leading batch dims if batched apply.
-        """
-        return self.cond_sample.apply(params, key, state, n)
-
-    def get_log_prob_grad(self, params, n, action, state=None):
-        """
-        Gradient of log-probability with respect to parameters at step n.
-
-        For n = 0, computes ∇_params log q0(action).
-        For n >= 1, computes ∇_params log qn(action | state).
-
-        Args:
-            params: Haiku parameter pytree for the relevant step.
-            n: Integer in [0, N], selects unconditional (0) or conditional (>=1).
-            action: Array with shape (..., state_dim), input vector.
-            state: Optional array with shape (..., state_dim), required if n >= 1.
-
-        Returns:
-            Pytree with the same structure as `params`, containing gradients.
-        """
-
-        def forward_loss(p):
-            if n == 0:
-                log_prob = self.log_prob_0(p, action)
+            logp_total_z = self.model.logprob_total_batch_norm(p, y_true_z, yp_true_z)
+            if self.model.use_data_normalization:
+                assert self.model.normalizer is not None
+                logp_total = logp_total_z - self.model.normalizer.log_det
             else:
-                log_prob = self.log_prob_cond(p, action, state, n)
+                logp_total = logp_total_z
+            nll_true = -jnp.mean(logp_total)
 
-            # log(0) = -inf will break the gradient, produce NaNs.
-            # Capping at -100.0 prevents the gradient from exploding to 10^15.
-            return jnp.maximum(log_prob, -100.0)
+            loss = loss_cost + beta * nll_true
 
-        return jax.grad(forward_loss)(params)
+            aux = {
+                "loss": loss,
+                "loss_cost_sf": loss_cost_sf,
+                "cost_mean_pathwise": cost_mean_pathwise,
+                "alpha_mix": alpha,
+                "nll_true": nll_true,
+                "beta": beta,
+                "mean_abs_rho_model": jnp.mean(rho_abs),
+            }
+            return loss, aux
 
-    @partial(jax.jit, static_argnums=0)
-    def sample_trajectory(self, key, params_trees):
+        (loss_val, aux), grads = jax.value_and_grad(loss_and_aux, has_aux=True)(params)
+
+        updates, opt_state = self.optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+
+        ema_params = jax.tree_util.tree_map(
+            lambda e, p: self.ema_decay * e + (1.0 - self.ema_decay) * p,
+            ema_params,
+            params,
+        )
+
+        return params, ema_params, opt_state, aux, beta
+
+    def update_params(self, key: jax.Array):
+        """Advance training by one step and return scalar metrics."""
+        step_i = jnp.asarray(self._step, dtype=jnp.int32)
+        self.params, self.ema_params, self.opt_state, metrics, beta = self._train_step(
+            self.params, self.ema_params, self.opt_state, key, step_i
+        )
+        self._last_beta_value = float(beta)
+        self._step += 1
+        return {k: float(v) for k, v in metrics.items()}
+
+    def compute_logging_losses(self, key: jax.Array):
+        """Compute logging metrics J_val, NLL_true, and combined J_beta."""
+        rng_namespace = int(self.run_sett_policy_gradient["RNG_NAMESPACE_PG"])
+        B = int(self.run_sett_metrics["num_samples"])
+        chunk = int(self.run_sett_metrics["chunk_size"])
+        params = self.get_eval_params_trees()
+
+        remaining = B
+        cur_key = jax.random.fold_in(key, rng_namespace)
+        cost_sum = 0.0
+        tot = 0
+        while remaining > 0:
+            cur = min(remaining, chunk)
+            cur_key, use_key = jax.random.split(cur_key)
+            keys = jax.random.split(use_key, cur)
+            y_z, yp_z, _ = self.model.sample_batch_norm(params, keys)
+            y, yp = self.model.normalizer.transform("denormalize", y_z, yp_z)
+            diff = y - yp
+            V0 = 0.5 * jnp.sum(diff * diff, axis=(1, 2, 3))
+            cost_sum += float(jnp.sum(V0))
+            tot += cur
+            remaining -= cur
+        J_val = cost_sum / max(tot, 1)
+
+        remaining = B
+        cur_key = jax.random.fold_in(key, rng_namespace + 111_111)
+        nll_sum = 0.0
+        tot = 0
+        while remaining > 0:
+            cur = min(remaining, chunk)
+            cur_key, use_key = jax.random.split(cur_key)
+            keys = jax.random.split(use_key, cur)
+            y_t, yp_t = jax.vmap(self.true_data_model.sample_true_trajectory)(keys)
+            y_z, yp_z = self.model.normalizer.transform("normalize", y_t, yp_t)
+            logp_z = self.model.logprob_total_batch_norm(params, y_z, yp_z)
+            if self.model.use_data_normalization:
+                assert self.model.normalizer is not None
+                logp = logp_z - self.model.normalizer.log_det
+            else:
+                logp = logp_z
+            nll_sum += float(jnp.sum(-logp))
+            tot += cur
+            remaining -= cur
+        NLL_true = nll_sum / max(tot, 1)
+
+        beta_now = float(self._last_beta_value)
+        J_beta = J_val + beta_now * NLL_true
+        return {
+            "J_val": float(J_val),
+            "NLL_true": float(NLL_true),
+            "J_beta": float(J_beta),
+            "beta_now": float(beta_now),
+        }
+
+    def sample_trajectories(
+        self,
+        key: jax.Array,
+        num: int,
+        params: hk.Params,
+    ):
         """
-        Sample an entire (y, y') trajectory from q0 and q1..qN.
-
-        Process:
-          1) Sample joint0 ~ q0 to obtain (y0, y0')
-          2) For n = 1..N, sample joint_n ~ q_n(· | prev_state) where
-             prev_state = concat(y_{n-1}, y'_{n-1})
-          3) Return stacked arrays for y and y' with explicit singleton channel
-
-        Args:
-            key: PRNGKey for sequential sampling across time.
-            params_trees: List of N+1 Haiku parameter pytrees; index 0 for q0,
-                and indices 1..N for q1..qN.
-
-        Returns:
-            Tuple (y_traj, y_traj_prime):
-              - y_traj: Array with shape (N+1, d_prime, 1)
-              - y_traj_prime: Array with shape (N+1, d_prime, 1)
+        Returns trajectories in ORIGINAL space:
+          y:  (num, N+1, d, 1)
+          yp: (num, N+1, d, 1)
         """
-        d = self.d_prime
-        key, k0 = jax.random.split(key)
-
-        joint0 = self._sample_0(params_trees[0], k0)
-        y0 = joint0[:d].reshape((d, 1))
-        y0p = joint0[d:].reshape((d, 1))
-
-        params_stack = tree_map(lambda *args: jnp.stack(args), *params_trees[1:])
-        n_indices = jnp.arange(1, self.N + 1)
-
-        def step(carry, xs):
-            param_t, n_idx = xs
-            prev_y, prev_yp, key_in = carry
-            key_in, ks = jax.random.split(key_in)
-            ctx = jnp.concatenate([prev_y.reshape(-1), prev_yp.reshape(-1)], axis=0)
-            joint_k = self._sample_cond(param_t, ks, ctx, n_idx)
-            yk = joint_k[:d].reshape((d, 1))
-            ypk = joint_k[d:].reshape((d, 1))
-            return (yk, ypk, key_in), (yk, ypk)
-
-        init_carry = (y0, y0p, key)
-        (_, _, _), (ys, yps) = lax.scan(step, init_carry, xs=(params_stack, n_indices))
-        y_traj = jnp.concatenate([y0[None, ...], ys], axis=0)
-        y_traj_prime = jnp.concatenate([y0p[None, ...], yps], axis=0)
-        return y_traj, y_traj_prime
-
-
-class TrueDataModelUnimodal:
-    """
-    Implements a true data model for statistical downscaling with a unimodal distribution.
-    """
-
-    def __init__(self, run_sett: dict):
-        self.N = run_sett["N"]
-        self.d_prime = run_sett["d_prime"]
-        self.base_means = jnp.linspace(-2, 2, self.d_prime).reshape(self.d_prime, 1)
-
-    def _step_dist(self, k, prev_val):
-        k_y, k_yp = jax.random.split(k)
-
-        noise_y = jax.random.normal(k_y, shape=(self.d_prime, 1)) * 0.5
-
-        raw_beta = jax.random.beta(k_yp, a=2.0, b=5.0, shape=(self.d_prime, 1))
-        noise_yp = (raw_beta * 4.0) - 1.5
-        # noise_yp = jax.random.t(k_yp, df=10, shape=(self.d_prime, 1)) * 0.5
-
-        noise = jnp.concatenate([noise_y, noise_yp], axis=1)
-
-        return self.base_means + 0.5 * prev_val + noise
-
-    @partial(jax.jit, static_argnums=0)
-    def sample_true_trajectory(self, key):
-        key, k0 = jax.random.split(key)
-
-        val0 = self._step_dist(k0, jnp.zeros((self.d_prime, 2)))
-
-        def step(carry, k):
-            next_val = self._step_dist(k, carry)
-            return next_val, next_val
-
-        keys = jax.random.split(key, self.N)
-        _, vals = jax.lax.scan(step, val0, keys)
-
-        traj = jnp.concatenate([val0[None, ...], vals], axis=0)
-
-        return traj[..., 0:1], traj[..., 1:2]
-
-
-class TrueDataModelBimodal:
-    """
-    Implements a true data model for statistical downscaling with a bimodal distribution.
-    """
-
-    def __init__(self, run_sett: dict):
-        self.N = run_sett["N"]
-        self.d_prime = run_sett["d_prime"]
-        self.base_means = jnp.linspace(-0.5, 0.0, self.d_prime).reshape(self.d_prime, 1)
-
-    def _step_dist(self, k, prev_val, selector):
-        k_y_l, k_y_r, k_yp_l, k_yp_r = jax.random.split(k, 4)
-
-        y_left = (jax.random.beta(k_y_l, 2.0, 5.0, shape=(self.d_prime, 1)) * 2.5) - 2.5
-        y_right = jax.random.normal(k_y_r, shape=(self.d_prime, 1)) * 0.5 + 1.5
-
-        yp_left = jax.random.normal(k_yp_l, shape=(self.d_prime, 1)) * 0.5 - 1.5
-        yp_right = (
-            jax.random.beta(k_yp_r, 5.0, 2.0, shape=(self.d_prime, 1)) * 2.5
-        ) + 0.5
-
-        noise_y = jnp.where(selector[:, 0:1], y_right, y_left)
-        noise_yp = jnp.where(selector[:, 1:2], yp_right, yp_left)
-
-        noise = jnp.concatenate([noise_y, noise_yp], axis=1)
-        return self.base_means + 0.5 * prev_val + noise
-
-    @partial(jax.jit, static_argnums=0)
-    def sample_true_trajectory(self, key):
-        key, k_sel, k0 = jax.random.split(key, 3)
-
-        selector = jax.random.bernoulli(k_sel, p=0.5, shape=(self.d_prime, 2))
-
-        val0 = self._step_dist(k0, jnp.zeros((self.d_prime, 2)), selector)
-
-        def step(carry, k):
-            prev_val, sel = carry
-            next_val = self._step_dist(k, prev_val, sel)
-            return (next_val, sel), next_val
-
-        keys = jax.random.split(key, self.N)
-        _, vals = jax.lax.scan(step, (val0, selector), keys)
-
-        traj = jnp.concatenate([val0[None, ...], vals], axis=0)
-        return traj[..., 0:1], traj[..., 1:2]
+        num = int(num)
+        keys = jax.random.split(key, num)
+        y_z, yp_z, _ = self.model.sample_batch_norm(params, keys)
+        y, yp = self.model.normalizer.transform("denormalize", y_z, yp_z)
+        return y, yp
