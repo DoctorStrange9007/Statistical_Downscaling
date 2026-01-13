@@ -67,7 +67,7 @@ class DataNormalizer:
           - mu_y, mu_yp: means, shape (N+1, d, 1)
           - var_y, var_yp: variances with floor eps^2, shape (N+1, d, 1)
           - std_y, std_yp: standard deviations, shape (N+1, d, 1)
-          - log_det: sum(log std_y) + sum(log std_yp); useful for Gaussian terms
+          - log_det: sum(log std_y) + sum(log std_yp); useful for change of variables formula due to normalization
         """
         self.fitted = True
         norm_key = jax.random.fold_in(
@@ -152,7 +152,7 @@ class DataNormalizer:
             - Requires `fit()` to have been called before normalization.
         """
         if not self.use_data_normalization:
-            return y_z, yp_z
+            return y, yp
         assert (
             self.fitted == True
         ), "DataNormalizer must be fitted before transforming data"
