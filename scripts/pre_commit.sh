@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ./env/bin/activate
+source ./.venv/bin/activate # .venv_OT or .venv_GEN
 echo Activated virtual environment
 
 for FILE in `exec git diff --cached --name-only | grep ".py"`; do
