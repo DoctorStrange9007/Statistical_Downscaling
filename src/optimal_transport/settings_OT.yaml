@@ -21,7 +21,7 @@ beta_schedule:
   type: "constant"
   warmup_end_ratio: 0.2
   init_boundary_value: 0.0
-  end_boundary_value: 100.0
+  end_boundary_value: 2.0
   kl_only_warmup_steps: 0
 lr_schedule:
   type: "constant"

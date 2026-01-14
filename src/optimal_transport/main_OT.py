@@ -37,7 +37,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 
 env_run_name = os.environ.get("WANDB_NAME", "").strip()
 if not env_run_name:
-    env_run_name = f"run_seed{run_sett["global"]["seed"]}"
+    env_run_name = f"run_seed{run_sett['global']['seed']}"
 
 gpu_tag_env = os.environ.get("GPU_TAG", "").strip()
 if not gpu_tag_env:
