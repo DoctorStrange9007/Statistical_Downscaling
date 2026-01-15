@@ -129,11 +129,30 @@ class WandbWriter:
 
         Expects keyword argument `images` as a mapping from name to image array.
         """
-        if hasattr(self.base_writer, "write_images"):
-            self.base_writer.write_images(*args, **kwargs)
         images = kwargs.get("images")
-        if images:
-            wandb.log({k: wandb.Image(v) for k, v in images.items()}, step=self._step)
+        step = kwargs.get("step", self._step)
+        if not images:
+            return
+
+        if hasattr(self.base_writer, "write_images"):
+            array_images = {k: v for k, v in images.items() if hasattr(v, "shape")}
+            if array_images:
+                try:
+                    self.base_writer.write_images(step=step, images=array_images)
+                except TypeError:
+                    self.base_writer.write_images(step, array_images)
+        try:
+            wandb.log({k: wandb.Image(v) for k, v in images.items()}, step=step)
+        except Exception:
+
+            payload = {}
+            for k, v in images.items():
+                try:
+                    payload[k] = wandb.Image(v)
+                except Exception:
+                    continue
+            if payload:
+                wandb.log(payload, step=step)
 
     def flush(self):
         """Flush the base writer buffers if supported."""
