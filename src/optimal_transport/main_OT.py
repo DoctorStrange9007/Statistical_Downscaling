@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from clu import metric_writers
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from src.wandb_integration.wandb_adapter import WandbWriter
+from wandb_integration.wandb_adapter import WandbWriter
 from src.optimal_transport.alg1_OT import PolicyGradient, NormalizingFlowModel
 from src.optimal_transport.dgp_OT import TrueDataModelUnimodal
 from src.optimal_transport.utils_OT import (
