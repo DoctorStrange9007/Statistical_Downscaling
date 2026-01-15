@@ -1,11 +1,11 @@
 output_dir: 'src/generation/output/'
-option: 'conditional'
+option: 'unconditional'
 rng_key: 888
 epsilon: 1e-10
 general:
   data_file_name: 'data/ks_trajectories_512.h5'
   d: 192 #3 for easy example 
-  d_prime: 48
+  d_prime: 24  #48?
   batch_size: 512 #32 for runthrough
   total_train_steps: 50 #1_000_000  for runthrough
   eval_every_steps: 10 #100 for runthrough
@@ -50,8 +50,8 @@ pde_solver:
   learning_rate: sirignano #set to specific value for fixed learning rate
   boundaries: [5000, 10000, 20000, 30000, 40000, 45000]
   lambda: 1 #to start with
-  num_gen_samples: 128 
-  num_models: 512 # aka num_conditions 512
+  num_gen_samples: 15360 # 128 8 is pde_solver on local machine 15360
+  num_models: 512 # 512 aka num_conditions 16 is pde_solver on local machine
 DGM:
   nodes_per_layer: 50
   num_layers: 3
