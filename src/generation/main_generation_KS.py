@@ -12,7 +12,7 @@ import yaml
 import argparse
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from src.generation.wandb_adapter import WandbWriter
+from wandb_integration.wandb_adapter import WandbWriter
 from src.generation.Statistical_Downscaling_PDE_KS import (
     KSStatisticalDownscalingPDESolver,
 )
